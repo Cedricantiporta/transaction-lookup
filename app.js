@@ -1,29 +1,21 @@
 'use strict';
 
 /* ============================================================
-   Moodboard — a local-first, minimalist image moodboard app.
-   No backend: everything lives in IndexedDB in this browser.
+   Moodboard — a shared, minimalist image moodboard app.
+   Data lives in Vercel Postgres + Vercel Blob (see /api); anyone
+   with the link sees and edits the same boards.
    ============================================================ */
 
-const DB_NAME = 'moodboardDB';
-const DB_VERSION = 1;
-const BIN_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const BIN_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, mirrors the server-side cron
 const THUMB_MAX_DIM = 720;
 const THUMB_QUALITY = 0.84;
+const FULL_MAX_DIM = 2200;
+const FULL_QUALITY = 0.85;
+const POLL_INTERVAL_MS = 15000;
 
-const PALETTE = [
-  '#0071e3', '#ff9f0a', '#ff375f', '#30d158', '#bf5af2',
-  '#64d2ff', '#ffd60a', '#ac8e68', '#5e5ce6', '#ff6482'
-];
-
-const uid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
-function pickColor(seedIndex) {
-  return PALETTE[seedIndex % PALETTE.length];
-}
 
 function formatBytes(bytes) {
   if (!bytes) return '0 MB';
@@ -48,102 +40,69 @@ function relativeDate(ts) {
   return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-/* ------------------------------- IndexedDB layer ------------------------------- */
+/* ------------------------------- API layer ------------------------------- */
 
-const DB = {
-  _db: null,
+async function request(url, options) {
+  const res = await fetch(url, options);
+  if (!res.ok) {
+    let message = `Request failed (${res.status})`;
+    try { const data = await res.json(); if (data && data.error) message = data.error; } catch { /* ignore */ }
+    throw new Error(message);
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
 
-  open() {
-    if (this._db) return Promise.resolve(this._db);
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, DB_VERSION);
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        if (!db.objectStoreNames.contains('boards')) {
-          db.createObjectStore('boards', { keyPath: 'id' });
-        }
-        if (!db.objectStoreNames.contains('categories')) {
-          const cats = db.createObjectStore('categories', { keyPath: 'id' });
-          cats.createIndex('boardId', 'boardId');
-        }
-        if (!db.objectStoreNames.contains('images')) {
-          const imgs = db.createObjectStore('images', { keyPath: 'id' });
-          imgs.createIndex('boardId', 'boardId');
-          imgs.createIndex('deletedAt', 'deletedAt');
-        }
-      };
-      req.onsuccess = () => { this._db = req.result; resolve(this._db); };
-      req.onerror = () => reject(req.error);
-    });
-  },
+const qs = (id) => `?id=${encodeURIComponent(id)}`;
+const jsonBody = (body) => ({ headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
-  async tx(storeNames, mode) {
-    const db = await this.open();
-    return db.transaction(storeNames, mode);
-  },
+const Api = {
+  listBoards: () => request('/api/boards'),
+  createBoard: (body) => request('/api/boards', { method: 'POST', ...jsonBody(body) }),
+  renameBoard: (id, name) => request(`/api/boards${qs(id)}`, { method: 'PATCH', ...jsonBody({ name }) }),
+  deleteBoard: (id) => request(`/api/boards${qs(id)}`, { method: 'DELETE' }),
 
-  async getAll(store, indexName, query) {
-    const tx = await this.tx(store, 'readonly');
-    return new Promise((resolve, reject) => {
-      const os = tx.objectStore(store);
-      const target = indexName ? os.index(indexName) : os;
-      const req = query !== undefined ? target.getAll(query) : target.getAll();
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-  },
+  listCategories: (boardId) => request(boardId ? `/api/categories?boardId=${encodeURIComponent(boardId)}` : '/api/categories'),
+  createCategory: (body) => request('/api/categories', { method: 'POST', ...jsonBody(body) }),
+  renameCategory: (id, name) => request(`/api/categories${qs(id)}`, { method: 'PATCH', ...jsonBody({ name }) }),
+  deleteCategory: (id) => request(`/api/categories${qs(id)}`, { method: 'DELETE' }),
 
-  async put(store, value) {
-    const tx = await this.tx(store, 'readwrite');
-    return new Promise((resolve, reject) => {
-      tx.objectStore(store).put(value);
-      tx.oncomplete = () => resolve(value);
-      tx.onerror = () => reject(tx.error);
-    });
-  },
-
-  async delete(store, id) {
-    const tx = await this.tx(store, 'readwrite');
-    return new Promise((resolve, reject) => {
-      tx.objectStore(store).delete(id);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-  },
-
-  async deleteMany(store, ids) {
-    const tx = await this.tx(store, 'readwrite');
-    const os = tx.objectStore(store);
-    ids.forEach((id) => os.delete(id));
-    return new Promise((resolve, reject) => {
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-  },
+  listImages: (boardId) => request(`/api/images?boardId=${encodeURIComponent(boardId)}`),
+  listBin: () => request('/api/images?bin=1'),
+  uploadImage: (formData) => request('/api/images', { method: 'POST', body: formData }),
+  patchImage: (id, body) => request(`/api/images${qs(id)}`, { method: 'PATCH', ...jsonBody(body) }),
+  deleteImageForever: (id) => request(`/api/images${qs(id)}`, { method: 'DELETE' }),
+  purgeNow: () => fetch('/api/cron/purge').catch(() => {}),
 };
 
 /* ------------------------------- Image processing ------------------------------- */
 
-async function fileToThumb(file) {
-  const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, THUMB_MAX_DIM / Math.max(bitmap.width, bitmap.height));
+function drawToJpeg(bitmap, maxDim, quality) {
+  const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
   const w = Math.max(1, Math.round(bitmap.width * scale));
   const h = Math.max(1, Math.round(bitmap.height * scale));
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff'; // JPEG has no alpha — flatten transparent PNGs onto white instead of black
+  ctx.fillRect(0, 0, w, h);
   ctx.drawImage(bitmap, 0, 0, w, h);
-  bitmap.close();
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', THUMB_QUALITY));
-  return { blob, width: w, height: h };
+  return new Promise((resolve) => canvas.toBlob((blob) => resolve({ blob, width: w, height: h }), 'image/jpeg', quality));
 }
 
-async function fileNaturalSize(file) {
+async function fileToThumb(file) {
   const bitmap = await createImageBitmap(file);
-  const size = { width: bitmap.width, height: bitmap.height };
+  const result = await drawToJpeg(bitmap, THUMB_MAX_DIM, THUMB_QUALITY);
   bitmap.close();
-  return size;
+  return result;
+}
+
+async function fileToFull(file) {
+  const bitmap = await createImageBitmap(file);
+  const result = await drawToJpeg(bitmap, FULL_MAX_DIM, FULL_QUALITY);
+  bitmap.close();
+  return result;
 }
 
 /* ------------------------------- App state ------------------------------- */
@@ -154,77 +113,44 @@ const state = {
   images: [],           // active images for current board (not deleted)
   binImages: [],         // all deleted images, across boards
   currentBoardId: null,
-  currentView: 'bin',    // 'board' | 'bin'
+  currentView: 'board',  // 'board' | 'bin'
   currentCategoryId: 'all',
   viewMode: localStorage.getItem('mb.viewMode') || 'masonry',
   search: '',
   selection: new Set(),
-  objectUrls: new Map(), // imageId -> { thumb, full }
 };
-
-function objectUrlFor(image, kind) {
-  const cache = state.objectUrls.get(image.id) || {};
-  if (!cache[kind]) {
-    cache[kind] = URL.createObjectURL(kind === 'thumb' ? image.thumbBlob : image.fullBlob);
-    state.objectUrls.set(image.id, cache);
-  }
-  return cache[kind];
-}
-
-function revokeObjectUrls(imageId) {
-  const cache = state.objectUrls.get(imageId);
-  if (!cache) return;
-  Object.values(cache).forEach((url) => URL.revokeObjectURL(url));
-  state.objectUrls.delete(imageId);
-}
 
 /* ------------------------------- Data operations ------------------------------- */
 
-async function purgeExpired() {
-  const deleted = await DB.getAll('images', 'deletedAt');
-  const expired = deleted.filter((img) => img.deletedAt && Date.now() - img.deletedAt > BIN_RETENTION_MS);
-  if (expired.length) {
-    await DB.deleteMany('images', expired.map((i) => i.id));
-  }
+function boardById(id) { return state.boards.find((b) => b.id === id); }
+
+async function refreshBoards() {
+  state.boards = await Api.listBoards();
 }
 
-async function loadBoards() {
-  state.boards = (await DB.getAll('boards')).sort((a, b) => a.order - b.order);
-  if (state.boards.length === 0) {
-    const board = { id: uid(), name: 'My Moodboard', color: pickColor(0), order: 0, createdAt: Date.now() };
-    await DB.put('boards', board);
-    state.boards = [board];
-  }
+async function selectBoard(boardId) {
+  state.currentView = 'board';
+  state.currentBoardId = boardId;
+  state.currentCategoryId = 'all';
+  state.selection.clear();
+  localStorage.setItem('mb.activeBoard', boardId);
+  state.images = await Api.listImages(boardId);
+  renderSidebar();
+  renderCategoryBar();
+  renderBoard();
 }
 
-async function loadCategories() {
-  state.categories = await DB.getAll('categories');
-}
-
-async function loadImagesForBoard(boardId) {
-  const all = await DB.getAll('images', 'boardId', boardId);
-  state.images = all.filter((img) => !img.deletedAt).sort((a, b) => b.createdAt - a.createdAt);
-}
-
-async function loadBin() {
-  const all = await DB.getAll('images', 'deletedAt');
-  state.binImages = all.filter((img) => img.deletedAt).sort((a, b) => b.deletedAt - a.deletedAt);
-}
-
-async function refreshStorageMeter() {
-  const label = $('#storageMeterLabel');
-  const fill = $('#storageMeterFill');
-  if (!navigator.storage || !navigator.storage.estimate) { label.textContent = ''; return; }
-  try {
-    const { usage, quota } = await navigator.storage.estimate();
-    label.textContent = `${formatBytes(usage)} used`;
-    fill.style.width = quota ? `${Math.min(100, (usage / quota) * 100)}%` : '0%';
-  } catch { label.textContent = ''; }
+async function showBin() {
+  state.currentView = 'bin';
+  state.selection.clear();
+  try { await Api.purgeNow(); } catch { /* best-effort */ }
+  state.binImages = await Api.listBin();
+  renderSidebar();
+  renderCategoryBar();
+  renderBoard();
 }
 
 /* ------------------------------- Rendering ------------------------------- */
-
-function boardById(id) { return state.boards.find((b) => b.id === id); }
 
 function renderSidebar() {
   const list = $('#boardList');
@@ -233,11 +159,10 @@ function renderSidebar() {
     const item = document.createElement('div');
     item.className = 'board-item' + (state.currentView === 'board' && state.currentBoardId === board.id ? ' active' : '');
     item.dataset.boardId = board.id;
-    item.draggable = false;
     item.innerHTML = `
       <span class="board-item-swatch" style="background:${board.color}"></span>
       <span class="board-item-name" spellcheck="false">${escapeHtml(board.name)}</span>
-      <span class="board-item-count">${state.imageCounts?.[board.id] ?? ''}</span>
+      <span class="board-item-count">${board.imageCount ?? ''}</span>
       <button class="board-item-menu-btn" aria-label="Board options">
         <svg viewBox="0 0 24 24" width="14" height="14"><circle cx="12" cy="5" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="19" r="1.6" fill="currentColor"/></svg>
       </button>`;
@@ -288,15 +213,6 @@ function renderSidebar() {
     titleEl.contentEditable = 'true';
     $('#boardSubtitle').textContent = `${state.images.length} image${state.images.length === 1 ? '' : 's'}`;
   }
-}
-
-async function refreshImageCounts() {
-  const counts = {};
-  for (const b of state.boards) {
-    const all = await DB.getAll('images', 'boardId', b.id);
-    counts[b.id] = all.filter((i) => !i.deletedAt).length;
-  }
-  state.imageCounts = counts;
 }
 
 function renderCategoryBar() {
@@ -396,7 +312,7 @@ function renderCard(image, idx, listRef) {
 
   card.innerHTML = `
     <div class="card-media">
-      <img src="${objectUrlFor(image, 'thumb')}" alt="${escapeHtml(image.name)}" loading="lazy" width="${image.width}" height="${image.height}">
+      <img src="${image.thumbUrl}" alt="${escapeHtml(image.name)}" loading="lazy" width="${image.width || 0}" height="${image.height || 0}">
       <div class="card-select-check">
         <svg viewBox="0 0 24 24" width="12" height="12"><path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </div>
@@ -502,38 +418,9 @@ function updateSelectionBar() {
 
 /* ------------------------------- Board CRUD ------------------------------- */
 
-async function selectBoard(boardId) {
-  state.currentView = 'board';
-  state.currentBoardId = boardId;
-  state.currentCategoryId = 'all';
-  state.selection.clear();
-  localStorage.setItem('mb.activeBoard', boardId);
-  await loadImagesForBoard(boardId);
-  renderSidebar();
-  renderCategoryBar();
-  renderBoard();
-}
-
-async function showBin() {
-  state.currentView = 'bin';
-  state.selection.clear();
-  await loadBin();
-  renderSidebar();
-  renderCategoryBar();
-  renderBoard();
-}
-
 async function createBoard() {
-  const board = {
-    id: uid(),
-    name: 'Untitled Moodboard',
-    color: pickColor(state.boards.length),
-    order: state.boards.length,
-    createdAt: Date.now(),
-  };
-  await DB.put('boards', board);
+  const board = await Api.createBoard({});
   state.boards.push(board);
-  await refreshImageCounts();
   await selectBoard(board.id);
   requestAnimationFrame(() => startRenameBoard(board.id, true));
 }
@@ -553,9 +440,9 @@ async function commitBoardRename(boardId, nameEl) {
   const newName = nameEl.textContent.trim() || 'Untitled Moodboard';
   nameEl.textContent = newName;
   if (board.name !== newName) {
-    board.name = newName;
-    await DB.put('boards', board);
-    if (state.currentBoardId === boardId) $('#boardTitle').textContent = newName;
+    const updated = await Api.renameBoard(boardId, newName);
+    Object.assign(board, updated);
+    if (state.currentBoardId === boardId) $('#boardTitle').textContent = board.name;
   }
 }
 
@@ -580,16 +467,9 @@ async function confirmDeleteBoard(boardId) {
   });
   if (!ok) return;
 
-  const images = await DB.getAll('images', 'boardId', boardId);
-  await DB.deleteMany('images', images.map((i) => i.id));
-  images.forEach((i) => revokeObjectUrls(i.id));
-  const cats = state.categories.filter((c) => c.boardId === boardId);
-  await Promise.all(cats.map((c) => DB.delete('categories', c.id)));
-  await DB.delete('boards', boardId);
-
+  await Api.deleteBoard(boardId);
   state.boards = state.boards.filter((b) => b.id !== boardId);
   state.categories = state.categories.filter((c) => c.boardId !== boardId);
-  await refreshImageCounts();
   const next = state.boards[0];
   await selectBoard(next.id);
   showToast(`"${board.name}" deleted`);
@@ -600,9 +480,7 @@ async function confirmDeleteBoard(boardId) {
 async function promptNewCategory() {
   const name = await showTextPrompt({ title: 'New category', placeholder: 'e.g. Textures, Palette, References' });
   if (!name) return;
-  const cats = state.categories.filter((c) => c.boardId === state.currentBoardId);
-  const cat = { id: uid(), boardId: state.currentBoardId, name, color: pickColor(cats.length), createdAt: Date.now() };
-  await DB.put('categories', cat);
+  const cat = await Api.createCategory({ boardId: state.currentBoardId, name });
   state.categories.push(cat);
   renderCategoryBar();
 }
@@ -610,8 +488,8 @@ async function promptNewCategory() {
 async function renameCategoryPrompt(cat) {
   const name = await showTextPrompt({ title: 'Rename category', placeholder: cat.name, initial: cat.name });
   if (!name) return;
-  cat.name = name;
-  await DB.put('categories', cat);
+  const updated = await Api.renameCategory(cat.id, name);
+  Object.assign(cat, updated);
   renderCategoryBar();
   renderBoard();
 }
@@ -623,12 +501,10 @@ async function deleteCategory(catId) {
     confirmLabel: 'Delete Category',
   });
   if (!ok) return;
-  const affected = await DB.getAll('images', 'boardId', state.currentBoardId);
-  await Promise.all(affected.filter((i) => i.categoryId === catId).map((i) => { i.categoryId = null; return DB.put('images', i); }));
-  await DB.delete('categories', catId);
+  await Api.deleteCategory(catId);
   state.categories = state.categories.filter((c) => c.id !== catId);
+  state.images.forEach((i) => { if (i.categoryId === catId) i.categoryId = null; });
   state.currentCategoryId = 'all';
-  await loadImagesForBoard(state.currentBoardId);
   renderCategoryBar();
   renderBoard();
 }
@@ -636,8 +512,8 @@ async function deleteCategory(catId) {
 async function setImageCategory(imageId, categoryId) {
   const image = state.images.find((i) => i.id === imageId) || state.binImages.find((i) => i.id === imageId);
   if (!image) return;
-  image.categoryId = categoryId || null;
-  await DB.put('images', image);
+  const updated = await Api.patchImage(imageId, { categoryId: categoryId || null });
+  Object.assign(image, updated);
   renderCategoryBar();
   renderBoard();
 }
@@ -652,20 +528,18 @@ async function addImages(files, boardId = state.currentBoardId) {
   let added = 0;
   for (const file of imageFiles) {
     try {
-      const { blob: thumbBlob, width, height } = await fileToThumb(file);
-      const image = {
-        id: uid(),
-        boardId,
-        categoryId: null,
-        name: file.name.replace(/\.[^/.]+$/, '') || 'Untitled',
-        width, height,
-        size: file.size,
-        createdAt: Date.now(),
-        deletedAt: undefined,
-        thumbBlob,
-        fullBlob: file,
-      };
-      await DB.put('images', image);
+      const [{ blob: thumbBlob }, { blob: fullBlob, width, height }] = await Promise.all([
+        fileToThumb(file),
+        fileToFull(file),
+      ]);
+      const form = new FormData();
+      form.append('boardId', boardId);
+      form.append('name', file.name.replace(/\.[^/.]+$/, '') || 'Untitled');
+      form.append('width', width);
+      form.append('height', height);
+      form.append('thumb', thumbBlob, 'thumb.jpg');
+      form.append('full', fullBlob, 'full.jpg');
+      const image = await Api.uploadImage(form);
       if (boardId === state.currentBoardId && state.currentView === 'board') {
         state.images.unshift(image);
       }
@@ -674,26 +548,22 @@ async function addImages(files, boardId = state.currentBoardId) {
       console.error('Failed to add image', file.name, err);
     }
   }
-  await refreshImageCounts();
+  await refreshBoards();
   renderSidebar();
   renderCategoryBar();
   renderBoard();
-  refreshStorageMeter();
-  showToast(`${added} image${added === 1 ? '' : 's'} added`);
+  const failed = imageFiles.length - added;
+  showToast(`${added} image${added === 1 ? '' : 's'} added${failed ? ` · ${failed} failed` : ''}`);
 }
 
 /* ------------------------------- Bin operations ------------------------------- */
 
 async function moveImagesToBin(ids) {
-  const images = state.images.filter((i) => ids.includes(i.id));
-  for (const img of images) {
-    img.deletedAt = Date.now();
-    await DB.put('images', img);
-  }
+  const deletedAt = Date.now();
+  await Promise.all(ids.map((id) => Api.patchImage(id, { deletedAt })));
   state.images = state.images.filter((i) => !ids.includes(i.id));
   state.selection.clear();
-  await refreshImageCounts();
-  await loadBin();
+  await Promise.all([refreshBoards(), (async () => { state.binImages = await Api.listBin(); })()]);
   renderSidebar();
   renderBoard();
   showToast(`Moved ${ids.length} image${ids.length > 1 ? 's' : ''} to Bin`, {
@@ -703,15 +573,11 @@ async function moveImagesToBin(ids) {
 }
 
 async function restoreImages(ids) {
-  const images = state.binImages.filter((i) => ids.includes(i.id));
-  for (const img of images) {
-    delete img.deletedAt;
-    await DB.put('images', img);
-  }
+  await Promise.all(ids.map((id) => Api.patchImage(id, { deletedAt: null })));
   state.binImages = state.binImages.filter((i) => !ids.includes(i.id));
   state.selection.clear();
-  await refreshImageCounts();
-  if (state.currentView === 'board') await loadImagesForBoard(state.currentBoardId);
+  await refreshBoards();
+  if (state.currentView === 'board') state.images = await Api.listImages(state.currentBoardId);
   renderSidebar();
   renderBoard();
   showToast(`Restored ${ids.length} image${ids.length > 1 ? 's' : ''}`);
@@ -724,26 +590,20 @@ async function confirmDeleteForever(ids) {
     confirmLabel: 'Delete Forever',
   });
   if (!ok) return;
-  await DB.deleteMany('images', ids);
-  ids.forEach(revokeObjectUrls);
+  await Promise.all(ids.map((id) => Api.deleteImageForever(id)));
   state.binImages = state.binImages.filter((i) => !ids.includes(i.id));
   state.selection.clear();
   renderSidebar();
   renderBoard();
-  refreshStorageMeter();
   showToast(`Deleted ${ids.length} image${ids.length > 1 ? 's' : ''} forever`);
 }
 
 async function moveImagesToBoard(ids, boardId) {
   const images = state.images.filter((i) => ids.includes(i.id));
   if (!images.length) return;
-  for (const img of images) {
-    img.boardId = boardId;
-    img.categoryId = null;
-    await DB.put('images', img);
-  }
+  await Promise.all(ids.map((id) => Api.patchImage(id, { boardId, categoryId: null })));
   state.images = state.images.filter((i) => !ids.includes(i.id));
-  await refreshImageCounts();
+  await refreshBoards();
   renderSidebar();
   renderBoard();
   const board = boardById(boardId);
@@ -754,40 +614,42 @@ function downloadImage(id) {
   const image = state.images.find((i) => i.id === id) || state.binImages.find((i) => i.id === id);
   if (!image) return;
   const a = document.createElement('a');
-  a.href = objectUrlFor(image, 'full');
-  a.download = image.name + guessExtension(image.fullBlob.type);
+  a.href = image.fullUrl;
+  a.download = `${image.name}.jpg`;
+  a.target = '_blank';
+  a.rel = 'noopener';
   document.body.appendChild(a);
   a.click();
   a.remove();
 }
 
-function guessExtension(mime) {
-  const map = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif', 'image/svg+xml': '.svg', 'image/avif': '.avif' };
-  return map[mime] || '';
-}
-
 /* ------------------------------- Context menu (cards) ------------------------------- */
 
 function showCardContextMenu(x, y, image) {
-  const cats = state.categories.filter((c) => c.boardId === image.boardId);
+  const isBin = state.currentView === 'bin';
   const items = [
     { label: 'View Full Screen', onClick: () => openLightbox(currentVisibleImages(), currentVisibleImages().findIndex((i) => i.id === image.id)) },
     { label: 'Download', onClick: () => downloadImage(image.id) },
     { sep: true },
-    { label: 'Category', sub: [
+  ];
+  if (!isBin) {
+    const cats = state.categories.filter((c) => c.boardId === image.boardId);
+    items.push({ label: 'Category', sub: [
       ...cats.map((c) => ({ label: c.name, swatch: c.color, onClick: () => setImageCategory(image.id, c.id) })),
       { label: '+ New category…', onClick: async () => {
         const name = await showTextPrompt({ title: 'New category', placeholder: 'Category name' });
         if (!name) return;
-        const cat = { id: uid(), boardId: image.boardId, name, color: pickColor(cats.length), createdAt: Date.now() };
-        await DB.put('categories', cat);
+        const cat = await Api.createCategory({ boardId: image.boardId, name });
         state.categories.push(cat);
         await setImageCategory(image.id, cat.id);
       } },
-    ] },
-    { sep: true },
-    { label: 'Move to Bin', danger: true, onClick: () => moveImagesToBin([image.id]) },
-  ];
+    ] });
+    items.push({ sep: true });
+    items.push({ label: 'Move to Bin', danger: true, onClick: () => moveImagesToBin([image.id]) });
+  } else {
+    items.push({ label: 'Restore', onClick: () => restoreImages([image.id]) });
+    items.push({ label: 'Delete Forever', danger: true, onClick: () => confirmDeleteForever([image.id]) });
+  }
   showContextMenu(x, y, items);
 }
 
@@ -873,7 +735,7 @@ function renderLightbox() {
   const image = lightboxList[lightboxIndex];
   if (!image) return closeLightbox();
   const img = $('#lightboxImage');
-  img.src = objectUrlFor(image, 'full');
+  img.src = image.fullUrl;
   img.alt = image.name;
 
   $('#lightboxName').value = image.name;
@@ -914,9 +776,9 @@ $('#lightboxCategorySelect').addEventListener('change', (e) => {
 });
 $('#lightboxName').addEventListener('change', async (e) => {
   const image = lightboxList[lightboxIndex];
-  image.name = e.target.value.trim() || 'Untitled';
+  const updated = await Api.patchImage(image.id, { name: e.target.value.trim() || 'Untitled' });
+  Object.assign(image, updated);
   e.target.value = image.name;
-  await DB.put('images', image);
   renderBoard();
 });
 
@@ -1037,7 +899,11 @@ function initTopbar() {
     const board = boardById(state.currentBoardId);
     const newName = e.target.textContent.trim() || 'Untitled Moodboard';
     e.target.textContent = newName;
-    if (board.name !== newName) { board.name = newName; await DB.put('boards', board); renderSidebar(); }
+    if (board.name !== newName) {
+      const updated = await Api.renameBoard(board.id, newName);
+      Object.assign(board, updated);
+      renderSidebar();
+    }
   });
   $('#boardTitle').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } });
 
@@ -1079,34 +945,84 @@ function initKeyboard() {
   });
 }
 
+/* ------------------------------- Live sync (lightweight polling) ------------------------------- */
+
+function isUserBusy() {
+  if ($('#lightbox').classList.contains('open')) return true;
+  if (!$('#modalBackdrop').hidden) return true;
+  if (!$('#contextMenu').hidden) return true;
+  if (document.visibilityState !== 'visible') return true;
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return true;
+  return false;
+}
+
+function sig(list, keys) {
+  return list.map((o) => keys.map((k) => o[k]).join('')).join('');
+}
+
+const BOARD_SIG_KEYS = ['id', 'name', 'color', 'order', 'imageCount'];
+const IMAGE_SIG_KEYS = ['id', 'name', 'categoryId', 'boardId', 'deletedAt'];
+
+async function pollTick() {
+  if (isUserBusy()) return;
+  try {
+    const boards = await Api.listBoards();
+    if (sig(boards, BOARD_SIG_KEYS) !== sig(state.boards, BOARD_SIG_KEYS)) {
+      state.boards = boards;
+      if (state.currentView === 'board' && !boardById(state.currentBoardId)) {
+        if (state.boards.length) await selectBoard(state.boards[0].id);
+        return;
+      }
+      renderSidebar();
+    }
+    if (state.currentView === 'board') {
+      const images = await Api.listImages(state.currentBoardId);
+      if (sig(images, IMAGE_SIG_KEYS) !== sig(state.images, IMAGE_SIG_KEYS)) {
+        state.images = images;
+        renderCategoryBar();
+        renderBoard();
+      }
+    } else if (state.currentView === 'bin') {
+      const bin = await Api.listBin();
+      if (sig(bin, IMAGE_SIG_KEYS) !== sig(state.binImages, IMAGE_SIG_KEYS)) {
+        state.binImages = bin;
+        renderBoard();
+      }
+    }
+  } catch {
+    // transient/offline — next tick retries
+  }
+}
+
+function startPolling() {
+  setInterval(pollTick, POLL_INTERVAL_MS);
+}
+
 /* ------------------------------- Boot ------------------------------- */
 
 async function init() {
-  await purgeExpired();
-  await loadBoards();
-  await loadCategories();
-  await refreshImageCounts();
-
-  const savedBoard = localStorage.getItem('mb.activeBoard');
-  const startBoard = boardById(savedBoard) ? savedBoard : state.boards[0].id;
-
   initTopbar();
   initUpload();
   initKeyboard();
 
-  await selectBoard(startBoard);
-  refreshStorageMeter();
+  state.boards = await Api.listBoards();
+  if (!state.boards.length) {
+    const board = await Api.createBoard({});
+    state.boards = [board];
+  }
+  state.categories = await Api.listCategories();
 
-  // periodic purge check in case the tab stays open past midnight
-  setInterval(async () => {
-    await purgeExpired();
-    if (state.currentView === 'bin') await showBin();
-  }, 60 * 60 * 1000);
+  const savedBoard = localStorage.getItem('mb.activeBoard');
+  const startBoard = boardById(savedBoard) ? savedBoard : state.boards[0].id;
+  await selectBoard(startBoard);
+
+  startPolling();
 }
 
 init().catch((err) => {
   console.error('Failed to start Moodboard', err);
   document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,sans-serif;color:#666;text-align:center;padding:20px;">
-    <div><h2 style="color:#111;">Couldn’t load Moodboard</h2><p>Your browser may not support IndexedDB, or storage access is blocked.</p></div>
+    <div><h2 style="color:#111;">Couldn’t load Moodboard</h2><p>The shared backend might not be set up yet, or is temporarily unreachable. Check the browser console for details.</p></div>
   </div>`;
 });
