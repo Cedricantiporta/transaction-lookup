@@ -2,13 +2,8 @@
   "name": "moodboard",
   "version": "1.0.0",
   "private": true,
-  "description": "A minimalist, Apple-inspired shared moodboard app.",
+  "description": "A minimalist, Apple-inspired offline moodboard app.",
   "scripts": {
-    "dev": "vercel dev"
-  },
-  "dependencies": {
-    "@neondatabase/serverless": "^1.1.0",
-    "@vercel/blob": "^2.7.0",
-    "formidable": "^3.5.2"
+    "dev": "npx --yes serve ."
   }
 }

@@ -1,8 +1,8 @@
 # Moodboard
 
 A minimalist, Apple-inspired moodboard app. Drag images in, organize them into
-projects, tag them by category, and view them full screen — shared with
-anyone who has the link, no login required.
+projects, tag them by category, and view them full screen — runs entirely in
+your browser, offline, with no account or server involved.
 
 ## Features
 
@@ -12,40 +12,30 @@ anyone who has the link, no login required.
 - **Categories** — tag images per moodboard and filter with the category chips
 - **Full-screen viewer** with keyboard navigation, renaming, and re-categorizing
 - **Bin** — deleted images are held for 30 days (with an Undo toast) before being
-  permanently purged automatically, on a daily schedule via a Vercel Cron Job
-- **Shared** — anyone with the link sees and edits the same boards; open
-  changes show up for others within ~15 seconds via lightweight polling
+  permanently purged automatically
+- **Offline & local** — everything is stored on your device only; nothing is
+  uploaded anywhere, and the app works with no network connection
 - Multi-select, drag-to-move between moodboards, and downloads
 
 ## Tech
 
-Vanilla HTML/CSS/JS on the frontend — no bundler, no framework. The backend
-is a handful of Vercel Serverless Functions under `/api`:
+Vanilla HTML/CSS/JS — no bundler, no framework, no backend:
 
-- **Vercel Postgres / Neon** for boards, categories, and image metadata
-- **Vercel Blob** for the actual image files (a client-resized thumbnail and
-  a client-resized "full" view, capped around 2200px to stay well under
-  serverless request-size limits — this is a deliberate trade-off for
-  reliability and zero build tooling, not literal original-file fidelity)
+- **localStorage** holds board and category metadata
+- **IndexedDB** holds the actual image data (as blobs), since it isn't
+  limited to a few MB of strings the way localStorage is
+- Images are client-resized to JPEG (a thumbnail and a capped ~2200px
+  "full" view) before being stored, to keep things fast and compact
 
-The database schema is created automatically on first request
-(`CREATE TABLE IF NOT EXISTS`) — no manual migration step.
-
-## One-time setup (in the Vercel dashboard)
-
-1. Open this project → **Storage** tab.
-2. Create a **Postgres** database (Neon) and connect it to the project.
-3. Create a **Blob** store and connect it to the project.
-4. Redeploy if it doesn't happen automatically.
-
-That's it — the app provisions its own tables on first use.
+All data lives only in the browser that created it. Clearing site data (or
+using a different browser/device/private window) starts a fresh moodboard.
 
 ## Running locally
 
 ```
 npm install
-npm run dev   # vercel dev — needs `vercel env pull` first for local credentials
+npm run dev   # serves the static files at http://localhost:3000
 ```
 
-The frontend alone (`index.html`/`app.js`/`styles.css`) can be served
-statically, but the API routes need a linked Postgres + Blob store to work.
+You can also just open `index.html` directly in a browser, or serve the
+folder with any static file server.

@@ -1,12 +1,13 @@
 'use strict';
 
 /* ============================================================
-   Moodboard — a shared, minimalist image moodboard app.
-   Data lives in Vercel Postgres + Vercel Blob (see /api); anyone
-   with the link sees and edits the same boards.
+   Moodboard — a minimalist, fully offline image moodboard app.
+   Everything lives in the browser: board/category metadata in
+   localStorage, image blobs in IndexedDB. No server, no network
+   requests — data stays on this device.
    ============================================================ */
 
-const BIN_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, mirrors the server-side cron
+const BIN_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const THUMB_MAX_DIM = 720;
 const THUMB_QUALITY = 0.84;
 const FULL_MAX_DIM = 2200;
@@ -40,39 +41,244 @@ function relativeDate(ts) {
   return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-/* ------------------------------- API layer ------------------------------- */
+/* ------------------------------- Local storage layer -------------------------------
+   Boards and categories are small, so they live as JSON in localStorage.
+   Images carry actual blob data, so they live in IndexedDB (localStorage's
+   ~5-10MB quota and string-only values make it a poor fit for binary image
+   data). The `Api` object below keeps the exact same async method shapes the
+   rest of the app already calls, so nothing above this section had to change.
+*/
 
-async function request(url, options) {
-  const res = await fetch(url, options);
-  if (!res.ok) {
-    let message = `Request failed (${res.status})`;
-    try { const data = await res.json(); if (data && data.error) message = data.error; } catch { /* ignore */ }
-    throw new Error(message);
-  }
-  if (res.status === 204) return null;
-  return res.json();
+const PALETTE = [
+  '#0071e3', '#ff9f0a', '#ff375f', '#30d158', '#bf5af2',
+  '#64d2ff', '#ffd60a', '#ac8e68', '#5e5ce6', '#ff6482',
+];
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
+const pickColor = (index) => PALETTE[((index % PALETTE.length) + PALETTE.length) % PALETTE.length];
+
+const BOARDS_KEY = 'mb.boards';
+const CATEGORIES_KEY = 'mb.categories';
+
+function loadBoards() { try { return JSON.parse(localStorage.getItem(BOARDS_KEY)) || []; } catch { return []; } }
+function saveBoards(boards) { localStorage.setItem(BOARDS_KEY, JSON.stringify(boards)); }
+function loadCategories() { try { return JSON.parse(localStorage.getItem(CATEGORIES_KEY)) || []; } catch { return []; } }
+function saveCategories(cats) { localStorage.setItem(CATEGORIES_KEY, JSON.stringify(cats)); }
+
+const IDB_NAME = 'moodboard-db';
+const IDB_STORE = 'images';
+let dbPromise = null;
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE, { keyPath: 'id' }).createIndex('boardId', 'boardId');
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function getDb() { if (!dbPromise) dbPromise = openDb(); return dbPromise; }
+
+async function idbGetAllImages() {
+  const db = await getDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const req = tx.objectStore(IDB_STORE).getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGetImage(id) {
+  const db = await getDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const req = tx.objectStore(IDB_STORE).get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbPutImage(record) {
+  const db = await getDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbDeleteImage(id) {
+  const db = await getDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
 }
 
-const qs = (id) => `?id=${encodeURIComponent(id)}`;
-const jsonBody = (body) => ({ headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+// Object URLs are created lazily per image id and cached, since the
+// underlying blobs never change — this keeps repeated list calls cheap and
+// avoids leaking a fresh blob: URL on every render.
+const objectUrlCache = new Map();
+function imageShape(record) {
+  let urls = objectUrlCache.get(record.id);
+  if (!urls) {
+    urls = { thumbUrl: URL.createObjectURL(record.thumbBlob), fullUrl: URL.createObjectURL(record.fullBlob) };
+    objectUrlCache.set(record.id, urls);
+  }
+  return {
+    id: record.id, boardId: record.boardId, categoryId: record.categoryId, name: record.name,
+    width: record.width, height: record.height, size: record.size,
+    thumbUrl: urls.thumbUrl, fullUrl: urls.fullUrl,
+    createdAt: record.createdAt, deletedAt: record.deletedAt,
+  };
+}
+function revokeImageUrls(id) {
+  const urls = objectUrlCache.get(id);
+  if (!urls) return;
+  URL.revokeObjectURL(urls.thumbUrl);
+  URL.revokeObjectURL(urls.fullUrl);
+  objectUrlCache.delete(id);
+}
 
 const Api = {
-  listBoards: () => request('/api/boards'),
-  createBoard: (body) => request('/api/boards', { method: 'POST', ...jsonBody(body) }),
-  renameBoard: (id, name) => request(`/api/boards${qs(id)}`, { method: 'PATCH', ...jsonBody({ name }) }),
-  deleteBoard: (id) => request(`/api/boards${qs(id)}`, { method: 'DELETE' }),
+  async listBoards() {
+    const images = await idbGetAllImages();
+    return loadBoards()
+      .slice()
+      .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt)
+      .map((b) => ({ ...b, imageCount: images.filter((i) => i.boardId === b.id && !i.deletedAt).length }));
+  },
 
-  listCategories: (boardId) => request(boardId ? `/api/categories?boardId=${encodeURIComponent(boardId)}` : '/api/categories'),
-  createCategory: (body) => request('/api/categories', { method: 'POST', ...jsonBody(body) }),
-  renameCategory: (id, name) => request(`/api/categories${qs(id)}`, { method: 'PATCH', ...jsonBody({ name }) }),
-  deleteCategory: (id) => request(`/api/categories${qs(id)}`, { method: 'DELETE' }),
+  async createBoard(body) {
+    const boards = loadBoards();
+    const order = boards.length;
+    const board = {
+      id: uid(),
+      name: (body.name || 'Untitled Moodboard').trim() || 'Untitled Moodboard',
+      color: body.color || pickColor(order),
+      order,
+      createdAt: Date.now(),
+    };
+    boards.push(board);
+    saveBoards(boards);
+    return { ...board, imageCount: 0 };
+  },
 
-  listImages: (boardId) => request(`/api/images?boardId=${encodeURIComponent(boardId)}`),
-  listBin: () => request('/api/images?bin=1'),
-  uploadImage: (formData) => request('/api/images', { method: 'POST', body: formData }),
-  patchImage: (id, body) => request(`/api/images${qs(id)}`, { method: 'PATCH', ...jsonBody(body) }),
-  deleteImageForever: (id) => request(`/api/images${qs(id)}`, { method: 'DELETE' }),
-  purgeNow: () => fetch('/api/cron/purge').catch(() => {}),
+  async renameBoard(id, name) {
+    const boards = loadBoards();
+    const board = boards.find((b) => b.id === id);
+    if (!board) throw new Error('Board not found');
+    board.name = name.trim() || 'Untitled Moodboard';
+    saveBoards(boards);
+    return { ...board };
+  },
+
+  async deleteBoard(id) {
+    saveBoards(loadBoards().filter((b) => b.id !== id));
+    saveCategories(loadCategories().filter((c) => c.boardId !== id));
+    const images = await idbGetAllImages();
+    for (const img of images.filter((i) => i.boardId === id)) {
+      revokeImageUrls(img.id);
+      await idbDeleteImage(img.id);
+    }
+    return null;
+  },
+
+  async listCategories(boardId) {
+    const cats = loadCategories();
+    return boardId ? cats.filter((c) => c.boardId === boardId) : cats;
+  },
+
+  async createCategory(body) {
+    if (!body.boardId || !body.name) throw new Error('boardId and name are required');
+    const cats = loadCategories();
+    const countForBoard = cats.filter((c) => c.boardId === body.boardId).length;
+    const category = {
+      id: uid(), boardId: body.boardId, name: String(body.name).trim() || 'Category',
+      color: body.color || pickColor(countForBoard), createdAt: Date.now(),
+    };
+    cats.push(category);
+    saveCategories(cats);
+    return category;
+  },
+
+  async renameCategory(id, name) {
+    const cats = loadCategories();
+    const cat = cats.find((c) => c.id === id);
+    if (!cat) throw new Error('Category not found');
+    cat.name = name.trim() || 'Category';
+    saveCategories(cats);
+    return { ...cat };
+  },
+
+  async deleteCategory(id) {
+    saveCategories(loadCategories().filter((c) => c.id !== id));
+    return null;
+  },
+
+  async listImages(boardId) {
+    const images = await idbGetAllImages();
+    return images
+      .filter((i) => i.boardId === boardId && !i.deletedAt)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(imageShape);
+  },
+
+  async listBin() {
+    const images = await idbGetAllImages();
+    return images
+      .filter((i) => i.deletedAt)
+      .sort((a, b) => b.deletedAt - a.deletedAt)
+      .map(imageShape);
+  },
+
+  async uploadImage(formData) {
+    const boardId = formData.get('boardId');
+    const name = (formData.get('name') || 'Untitled').toString().trim() || 'Untitled';
+    const width = Number(formData.get('width')) || null;
+    const height = Number(formData.get('height')) || null;
+    const thumbBlob = formData.get('thumb');
+    const fullBlob = formData.get('full');
+    if (!boardId || !thumbBlob || !fullBlob) throw new Error('boardId, thumb, and full are required');
+    const record = {
+      id: uid(), boardId, categoryId: null, name, width, height,
+      size: fullBlob.size, thumbBlob, fullBlob, createdAt: Date.now(), deletedAt: null,
+    };
+    await idbPutImage(record);
+    return imageShape(record);
+  },
+
+  async patchImage(id, body) {
+    const record = await idbGetImage(id);
+    if (!record) throw new Error('Image not found');
+    const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
+    if (has('name')) record.name = (body.name || 'Untitled').toString().trim() || 'Untitled';
+    if (has('categoryId')) record.categoryId = body.categoryId;
+    if (has('boardId')) record.boardId = body.boardId;
+    if (has('deletedAt')) record.deletedAt = body.deletedAt;
+    await idbPutImage(record);
+    return imageShape(record);
+  },
+
+  async deleteImageForever(id) {
+    revokeImageUrls(id);
+    await idbDeleteImage(id);
+    return null;
+  },
+
+  async purgeNow() {
+    const images = await idbGetAllImages();
+    const cutoff = Date.now() - BIN_RETENTION_MS;
+    for (const img of images.filter((i) => i.deletedAt && i.deletedAt < cutoff)) {
+      revokeImageUrls(img.id);
+      await idbDeleteImage(img.id);
+    }
+  },
 };
 
 /* ------------------------------- Image processing ------------------------------- */
@@ -945,7 +1151,9 @@ function initKeyboard() {
   });
 }
 
-/* ------------------------------- Live sync (lightweight polling) ------------------------------- */
+/* ------------------------------- Live sync (multi-tab, lightweight polling) -------------------------------
+   Everything is local now, but IndexedDB/localStorage are shared across tabs
+   of the same origin — this keeps multiple open tabs of the app in sync. */
 
 function isUserBusy() {
   if ($('#lightbox').classList.contains('open')) return true;
@@ -1023,6 +1231,6 @@ async function init() {
 init().catch((err) => {
   console.error('Failed to start Moodboard', err);
   document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,sans-serif;color:#666;text-align:center;padding:20px;">
-    <div><h2 style="color:#111;">Couldn’t load Moodboard</h2><p>The shared backend might not be set up yet, or is temporarily unreachable. Check the browser console for details.</p></div>
+    <div><h2 style="color:#111;">Couldn’t load Moodboard</h2><p>Your browser may be blocking local storage (private/incognito mode, or storage disabled). Check the browser console for details.</p></div>
   </div>`;
 });
