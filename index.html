@@ -7,9 +7,17 @@
 <meta name="description" content="A minimalist moodboard for collecting and organizing images.">
 <meta name="theme-color" content="#f5f5f7">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%2242%22 height=%2242%22 x=%228%22 y=%228%22 rx=%2210%22 fill=%22%23111%22/><rect width=%2242%22 height=%2242%22 x=%2250%22 y=%228%22 rx=%2210%22 fill=%22%23bbb%22/><rect width=%2242%22 height=%2242%22 x=%228%22 y=%2250%22 rx=%2210%22 fill=%22%23bbb%22/><rect width=%2242%22 height=%2242%22 x=%2250%22 y=%2250%22 rx=%2210%22 fill=%22%23111%22/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,500&display=swap">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+
+<div class="utility-bar">
+  <span class="utility-bar-tagline">Collect moments. Curate love.</span>
+  <span class="utility-bar-meta">SAVED LOCALLY · NO ACCOUNT NEEDED</span>
+</div>
 
 <div class="app" id="app">
 
@@ -18,9 +26,12 @@
     <div class="sidebar-header">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="20" height="20"><rect x="2" y="2" width="9" height="9" rx="2.4" fill="currentColor" opacity=".92"/><rect x="13" y="2" width="9" height="9" rx="2.4" fill="currentColor" opacity=".45"/><rect x="2" y="13" width="9" height="9" rx="2.4" fill="currentColor" opacity=".45"/><rect x="13" y="13" width="9" height="9" rx="2.4" fill="currentColor" opacity=".92"/></svg>
+          <svg viewBox="0 0 24 24" width="22" height="22"><rect x="2" y="2" width="9" height="9" rx="2.4" fill="currentColor" opacity=".92"/><rect x="13" y="2" width="9" height="9" rx="2.4" fill="currentColor" opacity=".45"/><rect x="2" y="13" width="9" height="9" rx="2.4" fill="currentColor" opacity=".45"/><rect x="13" y="13" width="9" height="9" rx="2.4" fill="currentColor" opacity=".92"/></svg>
         </span>
-        <span class="brand-name">Moodboard</span>
+        <span class="brand-text">
+          <span class="brand-name">Moodboard</span>
+          <span class="brand-tagline">Personal Collections</span>
+        </span>
       </div>
       <button class="icon-btn sidebar-collapse-btn" id="collapseSidebarBtn" title="Collapse sidebar" aria-label="Collapse sidebar">
         <svg viewBox="0 0 24 24" width="16" height="16"><path d="M15 4v16M4 4h16a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
