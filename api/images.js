@@ -42,8 +42,11 @@ module.exports = async function handler(req, res) {
     const name = (first(fields.name) || 'Untitled').toString().trim() || 'Untitled';
     const width = Number(first(fields.width)) || null;
     const height = Number(first(fields.height)) || null;
+    const isHex = (c) => /^#[0-9a-fA-F]{6}$/.test(c);
     const colorField = (first(fields.color) || '').toString();
-    const dominantColor = /^#[0-9a-fA-F]{6}$/.test(colorField) ? colorField : null;
+    let colors = [];
+    try { colors = JSON.parse((first(fields.colors) || '[]').toString()).filter(isHex); } catch { /* ignore malformed */ }
+    const dominantColor = colors[0] || (isHex(colorField) ? colorField : null);
     const thumbFile = first(files.thumb);
     const fullFile = first(files.full);
 
@@ -65,18 +68,18 @@ module.exports = async function handler(req, res) {
       const image = {
         id, boardId, categoryId: null, name, width, height,
         size: fullFile.size, thumbUrl: thumbBlob.url, fullUrl: fullBlob.url,
-        createdAt: Date.now(), dominantColor,
+        createdAt: Date.now(), dominantColor, colors: colors.length ? JSON.stringify(colors) : null,
       };
       await sql`
-        INSERT INTO images (id, board_id, category_id, name, width, height, size, thumb_url, full_url, created_at, dominant_color)
-        VALUES (${image.id}, ${image.boardId}, NULL, ${image.name}, ${image.width}, ${image.height}, ${image.size}, ${image.thumbUrl}, ${image.fullUrl}, ${image.createdAt}, ${image.dominantColor})
+        INSERT INTO images (id, board_id, category_id, name, width, height, size, thumb_url, full_url, created_at, dominant_color, colors)
+        VALUES (${image.id}, ${image.boardId}, NULL, ${image.name}, ${image.width}, ${image.height}, ${image.size}, ${image.thumbUrl}, ${image.fullUrl}, ${image.createdAt}, ${image.dominantColor}, ${image.colors})
       `;
       const { rows: boardRows } = await sql`SELECT name FROM boards WHERE id = ${boardId}`;
       await logActivity(session, {
         action: 'upload_image', targetType: 'image', targetId: image.id, targetName: image.name,
         boardId, boardName: boardRows[0]?.name,
       });
-      return send(res, 201, image);
+      return send(res, 201, { ...image, colors });
     } catch (err) {
       console.error('Image upload failed', err);
       return send(res, 500, { error: 'Upload failed' });

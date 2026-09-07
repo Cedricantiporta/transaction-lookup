@@ -39,18 +39,37 @@ module.exports = async function handler(req, res) {
     return send(res, 201, { ...board, imageCount: 0 });
   }
 
+  if (req.method === 'PATCH' && !req.query.id) {
+    const body = await readJson(req);
+    if (!Array.isArray(body.order) || !body.order.length) {
+      return send(res, 400, { error: 'Provide ?id= to update one board, or a body.order array to reorder all of them' });
+    }
+    await Promise.all(body.order.map((boardId, idx) => sql`UPDATE boards SET board_order = ${idx} WHERE id = ${boardId}`));
+    return send(res, 204, null);
+  }
+
   const id = req.query.id;
   if (!id) return send(res, 400, { error: 'Missing ?id=' });
 
   if (req.method === 'PATCH') {
     const body = await readJson(req);
-    if (typeof body.name === 'string') {
+    const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
+    let touched = false;
+
+    if (has('name') && typeof body.name === 'string') {
       const name = body.name.trim() || 'Untitled Moodboard';
-      const { rows } = await sql`UPDATE boards SET name = ${name} WHERE id = ${id} RETURNING *`;
-      if (!rows.length) return send(res, 404, { error: 'Board not found' });
-      return send(res, 200, boardRow(rows[0]));
+      await sql`UPDATE boards SET name = ${name} WHERE id = ${id}`;
+      touched = true;
     }
-    return send(res, 400, { error: 'Nothing to update' });
+    if (has('color') && /^#[0-9a-fA-F]{6}$/.test(body.color)) {
+      await sql`UPDATE boards SET color = ${body.color} WHERE id = ${id}`;
+      touched = true;
+    }
+    if (!touched) return send(res, 400, { error: 'Nothing to update' });
+
+    const { rows } = await sql`SELECT * FROM boards WHERE id = ${id}`;
+    if (!rows.length) return send(res, 404, { error: 'Board not found' });
+    return send(res, 200, boardRow(rows[0]));
   }
 
   if (req.method === 'DELETE') {

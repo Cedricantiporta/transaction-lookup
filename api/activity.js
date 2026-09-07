@@ -9,6 +9,6 @@ module.exports = async function handler(req, res) {
 
   if (req.method !== 'GET') return methodNotAllowed(res, ['GET']);
 
-  const { rows } = await sql`SELECT * FROM activity_log ORDER BY created_at DESC LIMIT 100`;
+  const { rows } = await sql`SELECT * FROM activity_log ORDER BY created_at DESC LIMIT 50`;
   return send(res, 200, rows.map(activityRow));
 };

@@ -54,12 +54,14 @@ function ensureSchema() {
           thumb_url TEXT NOT NULL,
           full_url TEXT NOT NULL,
           created_at BIGINT NOT NULL,
-          dominant_color TEXT
+          dominant_color TEXT,
+          colors TEXT
         )
       `;
       // Additive — safe on both a fresh table (already has the column) and
       // an existing deployed one created before this column existed.
       await sql`ALTER TABLE images ADD COLUMN IF NOT EXISTS dominant_color TEXT`;
+      await sql`ALTER TABLE images ADD COLUMN IF NOT EXISTS colors TEXT`;
       await sql`CREATE INDEX IF NOT EXISTS images_board_idx ON images(board_id)`;
       await sql`CREATE INDEX IF NOT EXISTS categories_board_idx ON categories(board_id)`;
       await sql`
@@ -125,7 +127,14 @@ function imageRow(r) {
     fullUrl: r.full_url,
     createdAt: Number(r.created_at),
     dominantColor: r.dominant_color,
+    colors: parseColors(r.colors) || (r.dominant_color ? [r.dominant_color] : []),
   };
+}
+
+function parseColors(raw) {
+  if (!raw) return null;
+  try { const arr = JSON.parse(raw); return Array.isArray(arr) ? arr : null; }
+  catch { return null; }
 }
 
 function mockupItemRow(r) {

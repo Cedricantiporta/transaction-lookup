@@ -69,6 +69,8 @@ const Api = {
   listBoards: () => request('/api/boards'),
   createBoard: (body) => request('/api/boards', { method: 'POST', ...jsonBody(body) }),
   renameBoard: (id, name) => request(`/api/boards${qs(id)}`, { method: 'PATCH', ...jsonBody({ name }) }),
+  setBoardColor: (id, color) => request(`/api/boards${qs(id)}`, { method: 'PATCH', ...jsonBody({ color }) }),
+  reorderBoards: (ids) => request('/api/boards', { method: 'PATCH', ...jsonBody({ order: ids }) }),
   deleteBoard: (id) => request(`/api/boards${qs(id)}`, { method: 'DELETE' }),
 
   listCategories: (boardId) => request(boardId ? `/api/categories?boardId=${encodeURIComponent(boardId)}` : '/api/categories'),
@@ -136,10 +138,15 @@ async function fileToFull(file) {
   return result;
 }
 
-async function computeDominantColor(file) {
+// Samples the image, buckets pixels into hue bins, and returns the top
+// couple of dominant *chromatic* colors — near-white/black/gray pixels are
+// excluded so a mostly-white product photo doesn't just report "white" and
+// bury the actual accent colors. Falls back to a neutral average only if
+// the image has no real color in it at all.
+async function computeDominantColors(file, maxColors = 3) {
   try {
     const bitmap = await createImageBitmap(file);
-    const size = 16;
+    const size = 32;
     const canvas = document.createElement('canvas');
     canvas.width = size;
     canvas.height = size;
@@ -147,17 +154,35 @@ async function computeDominantColor(file) {
     ctx.drawImage(bitmap, 0, 0, size, size);
     bitmap.close();
     const { data } = ctx.getImageData(0, 0, size, size);
-    let r = 0, g = 0, b = 0, n = 0;
+
+    const HUE_BINS = 24; // 15° each
+    const bins = Array.from({ length: HUE_BINS }, () => ({ count: 0, r: 0, g: 0, b: 0 }));
+    let neutralCount = 0, neutralR = 0, neutralG = 0, neutralB = 0;
+
     for (let i = 0; i < data.length; i += 4) {
       if (data[i + 3] < 128) continue; // skip mostly-transparent pixels
-      r += data[i]; g += data[i + 1]; b += data[i + 2];
-      n++;
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const { h, s, l } = rgbToHsl(r, g, b);
+      if (s < 12 || l < 8 || l > 94) {
+        neutralCount++; neutralR += r; neutralG += g; neutralB += b;
+        continue;
+      }
+      const bin = Math.floor(h / (360 / HUE_BINS)) % HUE_BINS;
+      bins[bin].count++; bins[bin].r += r; bins[bin].g += g; bins[bin].b += b;
     }
-    if (!n) return null;
-    r = Math.round(r / n); g = Math.round(g / n); b = Math.round(b / n);
-    return '#' + [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('');
+
+    const toHex = (r, g, b) => '#' + [r, g, b].map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
+    const ranked = bins
+      .filter((bin) => bin.count > 0)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, maxColors)
+      .map((bin) => toHex(bin.r / bin.count, bin.g / bin.count, bin.b / bin.count));
+
+    if (ranked.length) return ranked;
+    if (neutralCount) return [toHex(neutralR / neutralCount, neutralG / neutralCount, neutralB / neutralCount)];
+    return [];
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -216,6 +241,13 @@ function isLightColor(hex) {
   return l > 65;
 }
 
+// An image can have several detected palette colors — it matches a color
+// filter if any one of them buckets to it.
+function bucketsForImage(image) {
+  const colors = (image.colors && image.colors.length) ? image.colors : (image.dominantColor ? [image.dominantColor] : []);
+  return new Set(colors.map(bucketForColor).filter(Boolean));
+}
+
 /* ------------------------------- App state ------------------------------- */
 
 const state = {
@@ -270,6 +302,30 @@ async function selectBoard(boardId) {
   if (window.innerWidth <= MOBILE_BREAKPOINT) setSidebarOpen(false);
 }
 
+async function reorderBoard(draggedId, targetId, before) {
+  if (draggedId === targetId) return;
+  const ids = state.boards.map((b) => b.id);
+  const fromIdx = ids.indexOf(draggedId);
+  if (fromIdx === -1) return;
+  ids.splice(fromIdx, 1);
+  let toIdx = ids.indexOf(targetId);
+  if (toIdx === -1) return;
+  if (!before) toIdx += 1;
+  ids.splice(toIdx, 0, draggedId);
+
+  const orderIndex = new Map(ids.map((id, i) => [id, i]));
+  state.boards.sort((a, b) => orderIndex.get(a.id) - orderIndex.get(b.id));
+  renderSidebar();
+
+  try {
+    await Api.reorderBoards(ids);
+  } catch (err) {
+    console.error('Failed to save moodboard order', err);
+    await refreshBoards();
+    renderSidebar();
+  }
+}
+
 /* ------------------------------- Rendering ------------------------------- */
 
 function renderSidebar() {
@@ -279,6 +335,7 @@ function renderSidebar() {
     const item = document.createElement('div');
     item.className = 'board-item' + (state.currentBoardId === board.id ? ' active' : '');
     item.dataset.boardId = board.id;
+    item.draggable = true;
     item.innerHTML = `
       <span class="board-item-swatch" style="background:${board.color}"></span>
       <span class="board-item-name" spellcheck="false">${escapeHtml(board.name)}</span>
@@ -305,12 +362,33 @@ function renderSidebar() {
       openBoardMenu(e.currentTarget, board.id);
     });
 
-    // drag images onto a sidebar board to move them
-    item.addEventListener('dragover', (e) => { e.preventDefault(); item.classList.add('drag-over'); });
-    item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
+    // dragging the board item itself reorders the sidebar list
+    item.addEventListener('dragstart', (e) => {
+      if (e.target.isContentEditable) { e.preventDefault(); return; }
+      e.dataTransfer.setData('text/moodboard-board-id', board.id);
+      e.dataTransfer.effectAllowed = 'move';
+    });
+
+    // drag images onto a sidebar board to move them; dragging another
+    // board over this one reorders instead
+    item.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      if (e.dataTransfer.types.includes('text/moodboard-board-id')) {
+        const rect = item.getBoundingClientRect();
+        const before = (e.clientY - rect.top) < rect.height / 2;
+        item.classList.toggle('board-drop-before', before);
+        item.classList.toggle('board-drop-after', !before);
+      } else {
+        item.classList.add('drag-over');
+      }
+    });
+    item.addEventListener('dragleave', () => item.classList.remove('drag-over', 'board-drop-before', 'board-drop-after'));
     item.addEventListener('drop', (e) => {
       e.preventDefault();
-      item.classList.remove('drag-over');
+      const dropBefore = item.classList.contains('board-drop-before');
+      item.classList.remove('drag-over', 'board-drop-before', 'board-drop-after');
+      const draggedBoardId = e.dataTransfer.getData('text/moodboard-board-id');
+      if (draggedBoardId) { reorderBoard(draggedBoardId, board.id, dropBefore); return; }
       const imageId = e.dataTransfer.getData('text/moodboard-image-id');
       if (imageId) moveImagesToBoard([imageId], board.id);
     });
@@ -356,7 +434,7 @@ function renderCategoryBar() {
   addChip.addEventListener('click', () => promptNewCategory());
   bar.appendChild(addChip);
 
-  const presentBuckets = new Set(state.images.map((i) => bucketForColor(i.dominantColor)).filter(Boolean));
+  const presentBuckets = new Set(state.images.flatMap((i) => Array.from(bucketsForImage(i))));
   if (presentBuckets.size > 1) {
     const divider = document.createElement('div');
     divider.className = 'category-bar-divider';
@@ -390,7 +468,7 @@ function currentVisibleImages() {
     list = list.filter((i) => i.categoryId === state.currentCategoryId);
   }
   if (state.currentColorFilter) {
-    list = list.filter((i) => bucketForColor(i.dominantColor) === state.currentColorFilter);
+    list = list.filter((i) => bucketsForImage(i).has(state.currentColorFilter));
   }
   if (state.search.trim()) {
     const q = state.search.trim().toLowerCase();
@@ -568,10 +646,36 @@ async function commitBoardRename(boardId, nameEl) {
   }
 }
 
+// Mirrors the server's auto-assign palette in api/_lib/util.js, so a
+// manually picked color still looks like it belongs to the same set.
+const BOARD_COLOR_PALETTE = [
+  { hex: '#0071e3', label: 'Blue' },
+  { hex: '#ff9f0a', label: 'Orange' },
+  { hex: '#ff375f', label: 'Red' },
+  { hex: '#30d158', label: 'Green' },
+  { hex: '#bf5af2', label: 'Purple' },
+  { hex: '#64d2ff', label: 'Sky' },
+  { hex: '#ffd60a', label: 'Yellow' },
+  { hex: '#ac8e68', label: 'Tan' },
+  { hex: '#5e5ce6', label: 'Indigo' },
+  { hex: '#ff6482', label: 'Rose' },
+];
+
+async function changeBoardColor(boardId, color) {
+  const board = boardById(boardId);
+  const updated = await Api.setBoardColor(boardId, color);
+  Object.assign(board, updated);
+  renderSidebar();
+}
+
 function openBoardMenu(anchorEl, boardId) {
   const rect = anchorEl.getBoundingClientRect();
   showContextMenu(rect.right, rect.bottom + 4, [
     { label: 'Rename', onClick: () => startRenameBoard(boardId, true) },
+    { label: 'Change Color', sub: BOARD_COLOR_PALETTE.map((c) => ({
+      label: c.label, swatch: c.hex, onClick: () => changeBoardColor(boardId, c.hex),
+    })) },
+    { sep: true },
     { label: 'Delete Moodboard', danger: true, onClick: () => confirmDeleteBoard(boardId) },
   ]);
 }
@@ -671,17 +775,18 @@ async function addImages(files, boardId = state.currentBoardId) {
     const previewUrl = URL.createObjectURL(file);
     setUploadProgress({ current: i, total, previewUrl, fileName: file.name });
     try {
-      const [{ blob: thumbBlob }, { blob: fullBlob, width, height }, dominantColor] = await Promise.all([
+      const [{ blob: thumbBlob }, { blob: fullBlob, width, height }, colors] = await Promise.all([
         fileToThumb(file),
         fileToFull(file),
-        computeDominantColor(file),
+        computeDominantColors(file),
       ]);
       const form = new FormData();
       form.append('boardId', boardId);
       form.append('name', file.name.replace(/\.[^/.]+$/, '') || 'Untitled');
       form.append('width', width);
       form.append('height', height);
-      form.append('color', dominantColor || '');
+      form.append('color', colors[0] || '');
+      form.append('colors', JSON.stringify(colors));
       form.append('thumb', thumbBlob, 'thumb.jpg');
       form.append('full', fullBlob, 'full.jpg');
       const image = await Api.uploadImage(form);
