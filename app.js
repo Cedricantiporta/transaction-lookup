@@ -257,6 +257,14 @@ const state = {
   viewMode: localStorage.getItem('mb.viewMode') || 'masonry',
   search: '',
   selection: new Set(),
+  // Mockup item / design folders are boards too, just kept out of the
+  // regular moodboard list. Browsing one reuses selectBoard/renderBoard —
+  // folderMode + activeFolder just track which section's page we're on.
+  folderMode: null, // null | 'mockup' | 'design'
+  mockupFolders: [],
+  designFolders: [],
+  activeFolder: null,
+  lastMoodboardId: null,
 };
 
 /* ------------------------------- Data operations ------------------------------- */
@@ -277,6 +285,7 @@ function setSidebarOpen(open) {
 
 async function selectBoard(boardId) {
   state.currentBoardId = boardId;
+  state.lastMoodboardId = boardId;
   state.currentCategoryId = 'all';
   state.selection.clear();
   localStorage.setItem('mb.activeBoard', boardId);
@@ -330,7 +339,7 @@ function renderSidebar() {
   list.innerHTML = '';
   state.boards.forEach((board) => {
     const item = document.createElement('div');
-    item.className = 'board-item' + (state.currentBoardId === board.id ? ' active' : '');
+    item.className = 'board-item' + (!state.folderMode && state.currentBoardId === board.id ? ' active' : '');
     item.dataset.boardId = board.id;
     item.draggable = true;
     item.innerHTML = `
@@ -343,6 +352,7 @@ function renderSidebar() {
 
     item.addEventListener('click', (e) => {
       if (e.target.closest('.board-item-menu-btn') || e.target.isContentEditable) return;
+      exitFolderMode();
       selectBoard(board.id);
     });
 
@@ -393,8 +403,19 @@ function renderSidebar() {
     list.appendChild(item);
   });
 
-  const active = boardById(state.currentBoardId);
+  $('#mockupItemsSectionBtn').classList.toggle('active', state.folderMode === 'mockup');
+  $('#designsSectionBtn').classList.toggle('active', state.folderMode === 'design');
+
   const titleEl = $('#boardTitle');
+  if (state.folderMode) {
+    titleEl.textContent = state.activeFolder ? state.activeFolder.name : (state.folderMode === 'mockup' ? 'Mockup Items' : 'Designs');
+    titleEl.contentEditable = 'false';
+    const sectionLabel = state.folderMode === 'mockup' ? 'Mockup Items folder' : 'Design folder';
+    $('#boardSubtitle').textContent = `${sectionLabel} · ${state.images.length} image${state.images.length === 1 ? '' : 's'}`;
+    return;
+  }
+
+  const active = boardById(state.currentBoardId);
   if (active) {
     titleEl.textContent = active.name;
     titleEl.contentEditable = 'true';
@@ -405,6 +426,14 @@ function renderSidebar() {
 function renderCategoryBar() {
   const bar = $('#categoryBar');
   bar.innerHTML = '';
+
+  if (state.folderMode) {
+    bar.hidden = true;
+    renderFolderTabsBar();
+    return;
+  }
+  bar.hidden = false;
+  $('#folderTabsBar').hidden = true;
 
   const cats = state.categories.filter((c) => c.boardId === state.currentBoardId);
   const allChip = makeChip('All', state.currentCategoryId === 'all', null, state.images.length);
@@ -450,6 +479,89 @@ function renderCategoryBar() {
       bar.appendChild(swatch);
     });
   }
+}
+
+/* ------------------------------- Mockup item / design folders (full pages) ------------------------------- */
+
+async function enterFolderSection(type) {
+  state.folderMode = type;
+  const key = type === 'mockup' ? 'mockupFolders' : 'designFolders';
+  let folders = [];
+  try {
+    folders = await Api.listBoards(type);
+  } catch (err) {
+    console.error(`Failed to load ${type} folders`, err);
+  }
+  state[key] = folders;
+
+  const target = folders[0] || null;
+  state.activeFolder = target;
+  state.selection.clear();
+
+  if (target) {
+    state.currentCategoryId = 'all';
+    state.images = await Api.listImages(target.id);
+    state.currentBoardId = target.id;
+  } else {
+    state.currentBoardId = null;
+    state.images = [];
+  }
+  renderSidebar();
+  renderCategoryBar();
+  renderBoard();
+}
+
+function exitFolderMode() {
+  state.folderMode = null;
+  state.activeFolder = null;
+}
+
+async function switchFolder(type, folder) {
+  state.activeFolder = folder;
+  state.currentCategoryId = 'all';
+  state.selection.clear();
+  state.currentBoardId = folder.id;
+  state.images = await Api.listImages(folder.id);
+  renderSidebar();
+  renderCategoryBar();
+  renderBoard();
+}
+
+async function createFolderInline(type) {
+  const title = type === 'mockup' ? 'New mockup item folder' : 'New design folder';
+  const name = await showTextPrompt({ title, placeholder: 'Folder name' });
+  if (!name) return;
+  const key = type === 'mockup' ? 'mockupFolders' : 'designFolders';
+  try {
+    const folder = await Api.createBoard({ name, type });
+    state[key].push(folder);
+    await switchFolder(type, folder);
+  } catch (err) {
+    showToast('Failed to create folder');
+    console.error('Failed to create folder', err);
+  }
+}
+
+function renderFolderTabsBar() {
+  const bar = $('#folderTabsBar');
+  bar.hidden = false;
+  bar.innerHTML = '';
+  const type = state.folderMode;
+  const folders = type === 'mockup' ? state.mockupFolders : state.designFolders;
+
+  folders.forEach((folder) => {
+    const tab = document.createElement('button');
+    tab.className = 'mockup-folder-tab' + (state.currentBoardId === folder.id ? ' active' : '');
+    tab.textContent = folder.name;
+    tab.addEventListener('click', () => switchFolder(type, folder));
+    bar.appendChild(tab);
+  });
+
+  const addTab = document.createElement('button');
+  addTab.className = 'mockup-folder-tab mockup-folder-tab-add';
+  addTab.textContent = '+ New folder';
+  addTab.addEventListener('click', () => createFolderInline(type));
+  bar.appendChild(addTab);
 }
 
 function makeChip(label, active, color, count) {
@@ -593,7 +705,7 @@ function updateSelectionBar() {
     <div class="selection-bar-divider"></div>
     <div class="selection-bar-actions">
       <button class="ghost-btn" data-a="download">Download</button>
-      <button class="ghost-btn" data-a="move">Move to</button>
+      ${state.folderMode ? '' : '<button class="ghost-btn" data-a="move">Move to</button>'}
       <button class="ghost-btn danger" data-a="delete">Delete</button>
       <button class="icon-btn" data-a="clear" aria-label="Clear selection">
         <svg viewBox="0 0 24 24" width="14" height="14"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
@@ -603,7 +715,7 @@ function updateSelectionBar() {
   const ids = () => Array.from(state.selection);
   bar.querySelector('[data-a="download"]').addEventListener('click', () => ids().forEach((id) => downloadImage(id)));
   bar.querySelector('[data-a="delete"]').addEventListener('click', () => confirmDeleteImages(ids()));
-  bar.querySelector('[data-a="move"]').addEventListener('click', (e) => {
+  bar.querySelector('[data-a="move"]')?.addEventListener('click', (e) => {
     const otherBoards = state.boards.filter((b) => b.id !== state.currentBoardId);
     if (!otherBoards.length) { showToast('No other moodboards to move to'); return; }
     const rect = e.currentTarget.getBoundingClientRect();
@@ -618,6 +730,7 @@ function updateSelectionBar() {
 async function createBoard() {
   const board = await Api.createBoard({});
   state.boards.push(board);
+  exitFolderMode();
   await selectBoard(board.id);
   requestAnimationFrame(() => startRenameBoard(board.id, true));
 }
@@ -859,13 +972,15 @@ function downloadImage(id) {
 /* ------------------------------- Context menu (cards) ------------------------------- */
 
 function showCardContextMenu(x, y, image) {
-  const cats = state.categories.filter((c) => c.boardId === image.boardId);
-  const otherBoards = state.boards.filter((b) => b.id !== image.boardId);
   const items = [
     { label: 'View Full Screen', onClick: () => openLightbox(currentVisibleImages(), currentVisibleImages().findIndex((i) => i.id === image.id)) },
     { label: 'Download', onClick: () => downloadImage(image.id) },
-    { sep: true },
-    { label: 'Category', sub: [
+  ];
+  if (!state.folderMode) {
+    const cats = state.categories.filter((c) => c.boardId === image.boardId);
+    const otherBoards = state.boards.filter((b) => b.id !== image.boardId);
+    items.push({ sep: true });
+    items.push({ label: 'Category', sub: [
       ...cats.map((c) => ({ label: c.name, swatch: c.color, onClick: () => setImageCategory(image.id, c.id) })),
       { label: '+ New category…', onClick: async () => {
         const name = await showTextPrompt({ title: 'New category', placeholder: 'Category name' });
@@ -874,12 +989,12 @@ function showCardContextMenu(x, y, image) {
         state.categories.push(cat);
         await setImageCategory(image.id, cat.id);
       } },
-    ] },
-  ];
-  if (otherBoards.length) {
-    items.push({ label: 'Move to', sub: otherBoards.map((b) => ({
-      label: b.name, swatch: b.color, onClick: () => moveImagesToBoard([image.id], b.id),
-    })) });
+    ] });
+    if (otherBoards.length) {
+      items.push({ label: 'Move to', sub: otherBoards.map((b) => ({
+        label: b.name, swatch: b.color, onClick: () => moveImagesToBoard([image.id], b.id),
+      })) });
+    }
   }
   items.push({ sep: true });
   items.push({ label: 'Delete', danger: true, onClick: () => confirmDeleteImages([image.id]) });
@@ -1077,7 +1192,8 @@ function showTextPrompt({ title, placeholder = '', initial = '' }) {
 /* ------------------------------- Upload wiring (drag & drop, file input) ------------------------------- */
 
 function updateDropTargetLabel() {
-  $('#dropTargetName').textContent = boardById(state.currentBoardId)?.name || 'this moodboard';
+  const name = state.folderMode ? state.activeFolder?.name : boardById(state.currentBoardId)?.name;
+  $('#dropTargetName').textContent = name || 'this moodboard';
 }
 
 function initUpload() {
@@ -1148,6 +1264,8 @@ function initTopbar() {
   $('#activityBtn').addEventListener('click', openActivityPanel);
   $('#activityCloseBtn').addEventListener('click', closeActivityPanel);
   $('#activityPanelBackdrop').addEventListener('click', closeActivityPanel);
+  $('#mockupItemsSectionBtn').addEventListener('click', () => enterFolderSection('mockup'));
+  $('#designsSectionBtn').addEventListener('click', () => enterFolderSection('design'));
 }
 
 /* ------------------------------- Auth / profile ------------------------------- */
@@ -1230,8 +1348,10 @@ function closeActivityPanel() {
 /* ------------------------------- AI mockup generator ------------------------------- */
 
 // Mockup items and designs live in their own folders — boards with
-// type 'mockup' / 'design' instead of 'moodboard', so they never show up
-// in the regular sidebar, but reuse all the same board/image plumbing.
+// type 'mockup' / 'design' instead of 'moodboard', managed on their own
+// full pages (see enterFolderSection above). This popup is a pure picker:
+// choose one image from each kind, then generate — no uploading or folder
+// creation happens here anymore.
 const mockupState = {
   item: { folders: [], folderId: null, images: [], selectedId: null },
   design: { folders: [], folderId: null, images: [], selectedId: null },
@@ -1239,8 +1359,8 @@ const mockupState = {
 
 function mockupKindConfig(kind) {
   return kind === 'item'
-    ? { type: 'mockup', tabsEl: '#mockupItemFolderTabs', gridEl: '#mockupItemGrid', fileInput: '#mockupItemFileInput', newFolderTitle: 'New mockup item folder' }
-    : { type: 'design', tabsEl: '#mockupDesignFolderTabs', gridEl: '#mockupDesignGrid', fileInput: '#mockupDesignFileInput', newFolderTitle: 'New design folder' };
+    ? { type: 'mockup', tabsEl: '#mockupItemFolderTabs', gridEl: '#mockupItemGrid' }
+    : { type: 'design', tabsEl: '#mockupDesignFolderTabs', gridEl: '#mockupDesignGrid' };
 }
 
 async function openMockupModal() {
@@ -1248,6 +1368,8 @@ async function openMockupModal() {
   mockupState.design.selectedId = null;
   $('#mockupModalBackdrop').hidden = false;
   await Promise.all([loadMockupFolders('item'), loadMockupFolders('design')]);
+  const noFolders = !mockupState.item.folders.length || !mockupState.design.folders.length;
+  $('#mockupNoFoldersNote').hidden = !noFolders;
   updateMockupGenerateBtn();
 }
 
@@ -1289,11 +1411,11 @@ async function loadMockupFolderImages(kind) {
 }
 
 function renderMockupFolderTabs(kind) {
-  const { tabsEl, newFolderTitle } = mockupKindConfig(kind);
+  const { tabsEl } = mockupKindConfig(kind);
   const bucket = mockupState[kind];
   const container = $(tabsEl);
   container.innerHTML = '';
-
+  container.hidden = bucket.folders.length < 2;
   bucket.folders.forEach((folder) => {
     const tab = document.createElement('button');
     tab.className = 'mockup-folder-tab' + (bucket.folderId === folder.id ? ' active' : '');
@@ -1305,38 +1427,13 @@ function renderMockupFolderTabs(kind) {
     });
     container.appendChild(tab);
   });
-
-  const addTab = document.createElement('button');
-  addTab.className = 'mockup-folder-tab mockup-folder-tab-add';
-  addTab.textContent = '+ New folder';
-  addTab.title = newFolderTitle;
-  addTab.addEventListener('click', () => createMockupFolder(kind));
-  container.appendChild(addTab);
-}
-
-async function createMockupFolder(kind) {
-  const { type } = mockupKindConfig(kind);
-  const name = await showTextPrompt({ title: mockupKindConfig(kind).newFolderTitle, placeholder: 'Folder name' });
-  if (!name) return;
-  const bucket = mockupState[kind];
-  try {
-    const folder = await Api.createBoard({ name, type });
-    bucket.folders.push(folder);
-    bucket.folderId = folder.id;
-    renderMockupFolderTabs(kind);
-    await loadMockupFolderImages(kind);
-  } catch (err) {
-    showToast('Failed to create folder');
-    console.error('Failed to create folder', err);
-  }
 }
 
 function renderMockupGrid(kind) {
-  const { gridEl, fileInput } = mockupKindConfig(kind);
+  const { gridEl } = mockupKindConfig(kind);
   const bucket = mockupState[kind];
   const grid = $(gridEl);
   grid.innerHTML = '';
-
   bucket.images.forEach((image) => {
     const tile = document.createElement('div');
     tile.className = 'mockup-tile' + (bucket.selectedId === image.id ? ' selected' : '');
@@ -1349,44 +1446,15 @@ function renderMockupGrid(kind) {
     });
     grid.appendChild(tile);
   });
-
-  const addTile = document.createElement('button');
-  addTile.className = 'mockup-tile mockup-tile-add';
-  addTile.title = bucket.folderId ? 'Upload an image to this folder' : 'Create a folder first';
-  addTile.disabled = !bucket.folderId;
-  addTile.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
-  addTile.addEventListener('click', () => { if (bucket.folderId) $(fileInput).click(); });
-  grid.appendChild(addTile);
-}
-
-async function uploadToMockupFolder(kind, file) {
-  const bucket = mockupState[kind];
-  if (!bucket.folderId) return;
-  try {
-    const [{ blob: thumbBlob }, { blob: fullBlob, width, height }, colors] = await Promise.all([
-      fileToThumb(file), fileToFull(file), computeDominantColors(file),
-    ]);
-    const form = new FormData();
-    form.append('boardId', bucket.folderId);
-    form.append('name', file.name.replace(/\.[^/.]+$/, '') || 'Untitled');
-    form.append('width', width);
-    form.append('height', height);
-    form.append('color', colors[0] || '');
-    form.append('colors', JSON.stringify(colors));
-    form.append('thumb', thumbBlob, 'thumb.jpg');
-    form.append('full', fullBlob, 'full.jpg');
-    const image = await Api.uploadImage(form);
-    bucket.images.unshift(image);
-    bucket.selectedId = image.id;
-    renderMockupGrid(kind);
-    updateMockupGenerateBtn();
-  } catch (err) {
-    showToast('Upload failed');
-    console.error('Mockup folder upload failed', err);
-  }
 }
 
 async function generateMockup() {
+  // Generating while browsing a mockup/design folder page still has to
+  // drop the result into an actual moodboard — fall back to whichever one
+  // was last viewed, since state.currentBoardId points at the folder.
+  const destBoardId = state.folderMode ? (state.lastMoodboardId || state.boards[0]?.id) : state.currentBoardId;
+  if (!destBoardId) { showToast('Open a moodboard first — that’s where the result goes.'); return; }
+
   const btn = $('#mockupGenerateBtn');
   btn.disabled = true;
   btn.textContent = 'Generating…';
@@ -1395,15 +1463,18 @@ async function generateMockup() {
     const image = await Api.generateMockup({
       mockupItemId: mockupState.item.selectedId,
       designImageId: mockupState.design.selectedId,
-      boardId: state.currentBoardId,
+      boardId: destBoardId,
     });
-    state.images.unshift(image);
+    if (!state.folderMode && state.currentBoardId === destBoardId) {
+      state.images.unshift(image);
+      renderCategoryBar();
+      renderBoard();
+    }
     await refreshBoards();
     renderSidebar();
-    renderCategoryBar();
-    renderBoard();
     closeMockupModal();
-    showToast('Mockup added to the board');
+    const destName = boardById(destBoardId)?.name || 'the moodboard';
+    showToast(`Mockup added to "${destName}"`);
   } catch (err) {
     showToast(err.message || 'Mockup generation failed');
     console.error('Mockup generation failed', err);
@@ -1419,16 +1490,6 @@ function initMockup() {
   $('#mockupCancelBtn').addEventListener('click', closeMockupModal);
   $('#mockupModalBackdrop').addEventListener('click', (e) => { if (e.target === $('#mockupModalBackdrop')) closeMockupModal(); });
   $('#mockupGenerateBtn').addEventListener('click', generateMockup);
-  $('#mockupItemFileInput').addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (file) uploadToMockupFolder('item', file);
-    e.target.value = '';
-  });
-  $('#mockupDesignFileInput').addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (file) uploadToMockupFolder('design', file);
-    e.target.value = '';
-  });
 }
 
 function initKeyboard() {

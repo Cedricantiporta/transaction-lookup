@@ -27,10 +27,12 @@ signed-in team, with an activity log of who did what.
   lightweight polling
 - Multi-select for bulk download, move, and delete
 - **AI mockups** — mockup items (blank product photos) and designs live in
-  their own folders, organized just like moodboards but kept out of the
-  main sidebar. Pick one item and one design, generate via the Gemini API,
-  and the composited result is added to the current moodboard like any
-  other image
+  their own full-page sections ("Mockup Items" / "Designs" in the sidebar),
+  each organized into folders with tabs, uploads, everything a moodboard
+  page has — just kept separate from your actual moodboards. The "Create
+  Mockup" button opens a small picker to choose one item and one design,
+  generate via the Gemini API, and the composited result lands in whichever
+  moodboard you were last viewing, like any other image
 
 ## Tech
 

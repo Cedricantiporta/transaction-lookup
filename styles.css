@@ -222,6 +222,7 @@ img{ -webkit-user-drag: none; }
   transition: background .15s var(--ease), color .15s var(--ease);
 }
 .new-board-btn:hover{ background: var(--surface-2); color: var(--text); }
+.new-board-btn.active{ background: var(--accent); color: var(--accent-contrast); }
 
 .sidebar-divider{ height:1px; background: var(--border-soft); margin: 10px 4px; }
 
@@ -374,6 +375,14 @@ img{ -webkit-user-drag: none; }
   scrollbar-width:none;
 }
 .category-bar::-webkit-scrollbar{ display:none; }
+
+.page-folder-tabs{
+  padding: 4px 32px 16px;
+  overflow-x:auto;
+  flex-shrink:0;
+  scrollbar-width:none;
+}
+.page-folder-tabs::-webkit-scrollbar{ display:none; }
 
 .chip{
   display:flex; align-items:center; gap:6px;
@@ -973,6 +982,7 @@ img{ -webkit-user-drag: none; }
   .primary-btn{ padding: 7px 12px; }
 
   .category-bar{ padding: 4px 16px 14px; }
+  .page-folder-tabs{ padding: 4px 16px 14px; }
   .board-scroll{ padding: 4px 14px 60px; }
 
   .masonry{ columns: 2 140px; column-gap: 10px; }
