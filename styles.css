@@ -473,6 +473,14 @@ img{ -webkit-user-drag: none; }
 .card-action:hover{ background: rgba(255,255,255,0.32); }
 .card-action.danger:hover{ background: var(--danger); }
 
+/* Light-toned images (detected from the upload's average color) need dark
+   icon chrome instead — white-on-white is invisible otherwise. */
+.tone-light .card-action{ background: rgba(0,0,0,0.1); color:#1d1d1f; }
+.tone-light .card-action:hover{ background: rgba(0,0,0,0.2); }
+.tone-light .card-action.danger:hover{ background: var(--danger); color:#fff; }
+.tone-light .card-select-check{ background: rgba(255,255,255,0.55); border-color: rgba(0,0,0,0.25); color:#1d1d1f; }
+.tone-light .card-select-check svg{ stroke: currentColor; }
+
 .card-bottom{ color:#fff; }
 .card-name{
   font-size:12.5px; font-weight:560;

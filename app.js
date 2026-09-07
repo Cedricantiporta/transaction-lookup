@@ -179,6 +179,15 @@ function bucketForColor(hex) {
   return hued ? hued.key : 'gray';
 }
 
+// Cards over a light image need dark icon chrome instead of the default
+// light-on-dark treatment, or the hover controls disappear into it.
+function isLightColor(hex) {
+  if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) return false;
+  const n = parseInt(hex.slice(1), 16);
+  const { l } = rgbToHsl((n >> 16) & 255, (n >> 8) & 255, n & 255);
+  return l > 65;
+}
+
 /* ------------------------------- App state ------------------------------- */
 
 const state = {
@@ -393,7 +402,9 @@ function categoryFor(image) {
 
 function renderCard(image, idx, listRef) {
   const card = document.createElement('div');
-  card.className = 'card' + (state.selection.has(image.id) ? ' selected' : '');
+  card.className = 'card'
+    + (state.selection.has(image.id) ? ' selected' : '')
+    + (isLightColor(image.dominantColor) ? ' tone-light' : '');
   card.dataset.id = image.id;
   card.style.animationDelay = `${Math.min(idx, 24) * 18}ms`;
   card.draggable = true;
