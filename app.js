@@ -563,13 +563,34 @@ async function setImageCategory(imageId, categoryId) {
 
 /* ------------------------------- Image upload ------------------------------- */
 
+function setUploadProgress({ current, total, previewUrl, fileName }) {
+  const overlay = $('#uploadOverlay');
+  overlay.hidden = false;
+  const pct = total ? Math.round((current / total) * 100) : 0;
+  $('#uploadProgressFill').style.width = pct + '%';
+  $('#uploadProgressPct').textContent = pct + '%';
+  $('#uploadProgressCount').textContent = `${Math.min(current + 1, total)} of ${total}`;
+  $('#uploadTitle').textContent = fileName ? `Uploading “${fileName}”` : 'Finishing up…';
+  const thumb = $('#uploadThumb');
+  thumb.innerHTML = previewUrl ? `<img src="${previewUrl}" alt="">` : '';
+}
+
+function hideUploadProgress() {
+  $('#uploadOverlay').hidden = true;
+  $('#uploadThumb').innerHTML = '';
+}
+
 async function addImages(files, boardId = state.currentBoardId) {
   const imageFiles = Array.from(files).filter((f) => f.type.startsWith('image/'));
   if (imageFiles.length === 0) return;
-  showToast(`Adding ${imageFiles.length} image${imageFiles.length > 1 ? 's' : ''}…`);
 
+  const total = imageFiles.length;
   let added = 0;
-  for (const file of imageFiles) {
+
+  for (let i = 0; i < total; i++) {
+    const file = imageFiles[i];
+    const previewUrl = URL.createObjectURL(file);
+    setUploadProgress({ current: i, total, previewUrl, fileName: file.name });
     try {
       const [{ blob: thumbBlob }, { blob: fullBlob, width, height }] = await Promise.all([
         fileToThumb(file),
@@ -589,13 +610,20 @@ async function addImages(files, boardId = state.currentBoardId) {
       added++;
     } catch (err) {
       console.error('Failed to add image', file.name, err);
+    } finally {
+      URL.revokeObjectURL(previewUrl);
     }
   }
+
+  setUploadProgress({ current: total, total, previewUrl: null, fileName: null });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  hideUploadProgress();
+
   await refreshBoards();
   renderSidebar();
   renderCategoryBar();
   renderBoard();
-  const failed = imageFiles.length - added;
+  const failed = total - added;
   showToast(`${added} image${added === 1 ? '' : 's'} added${failed ? ` · ${failed} failed` : ''}`);
 }
 
