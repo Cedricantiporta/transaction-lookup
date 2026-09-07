@@ -17,6 +17,17 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// Last-known-good snapshots, used to paint instantly on load/board-switch
+// while the real network request runs in the background.
+function readCache(key) {
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; }
+  catch { return null; }
+}
+function writeCache(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); }
+  catch { /* storage full or unavailable — skip caching, not fatal */ }
+}
+
 function formatBytes(bytes) {
   if (!bytes) return '0 MB';
   const mb = bytes / (1024 * 1024);
@@ -128,26 +139,58 @@ async function refreshBoards() {
   state.boards = await Api.listBoards();
 }
 
+const MOBILE_BREAKPOINT = 640;
+
+function setSidebarOpen(open) {
+  $('#sidebar').classList.toggle('collapsed', !open);
+  const backdrop = $('#sidebarBackdrop');
+  if (backdrop) backdrop.hidden = !(open && window.innerWidth <= MOBILE_BREAKPOINT);
+}
+
 async function selectBoard(boardId) {
   state.currentView = 'board';
   state.currentBoardId = boardId;
   state.currentCategoryId = 'all';
   state.selection.clear();
   localStorage.setItem('mb.activeBoard', boardId);
+
+  // Paint instantly from whatever we last saw for this board, then let the
+  // real fetch below silently correct it once it lands.
+  const cachedImages = readCache('mb.cache.images.' + boardId);
+  if (cachedImages) {
+    state.images = cachedImages;
+    renderSidebar();
+    renderCategoryBar();
+    renderBoard();
+  }
+
   state.images = await Api.listImages(boardId);
+  writeCache('mb.cache.images.' + boardId, state.images);
   renderSidebar();
   renderCategoryBar();
   renderBoard();
+  if (window.innerWidth <= MOBILE_BREAKPOINT) setSidebarOpen(false);
 }
 
 async function showBin() {
   state.currentView = 'bin';
   state.selection.clear();
+
+  const cachedBin = readCache('mb.cache.bin');
+  if (cachedBin) {
+    state.binImages = cachedBin;
+    renderSidebar();
+    renderCategoryBar();
+    renderBoard();
+  }
+
   try { await Api.purgeNow(); } catch { /* best-effort */ }
   state.binImages = await Api.listBin();
+  writeCache('mb.cache.bin', state.binImages);
   renderSidebar();
   renderCategoryBar();
   renderBoard();
+  if (window.innerWidth <= MOBILE_BREAKPOINT) setSidebarOpen(false);
 }
 
 /* ------------------------------- Rendering ------------------------------- */
@@ -312,7 +355,7 @@ function renderCard(image, idx, listRef) {
 
   card.innerHTML = `
     <div class="card-media">
-      <img src="${image.thumbUrl}" alt="${escapeHtml(image.name)}" loading="lazy" width="${image.width || 0}" height="${image.height || 0}">
+      <img src="${image.thumbUrl}" alt="${escapeHtml(image.name)}" loading="lazy" decoding="async" fetchpriority="low" width="${image.width || 0}" height="${image.height || 0}">
       <div class="card-select-check">
         <svg viewBox="0 0 24 24" width="12" height="12"><path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </div>
@@ -922,14 +965,10 @@ function initTopbar() {
   $('#newBoardBtn').addEventListener('click', createBoard);
   $('#binBtn').addEventListener('click', showBin);
 
-  $('#collapseSidebarBtn').addEventListener('click', () => {
-    $('#sidebar').classList.add('collapsed');
-    $('#expandSidebarBtn').hidden = false;
+  $('#sidebarToggleBtn').addEventListener('click', () => {
+    setSidebarOpen($('#sidebar').classList.contains('collapsed'));
   });
-  $('#expandSidebarBtn').addEventListener('click', () => {
-    $('#sidebar').classList.remove('collapsed');
-    $('#expandSidebarBtn').hidden = true;
-  });
+  $('#sidebarBackdrop').addEventListener('click', () => setSidebarOpen(false));
 }
 
 function initKeyboard() {
@@ -970,6 +1009,7 @@ async function pollTick() {
     const boards = await Api.listBoards();
     if (sig(boards, BOARD_SIG_KEYS) !== sig(state.boards, BOARD_SIG_KEYS)) {
       state.boards = boards;
+      writeCache('mb.cache.boards', state.boards);
       if (state.currentView === 'board' && !boardById(state.currentBoardId)) {
         if (state.boards.length) await selectBoard(state.boards[0].id);
         return;
@@ -980,6 +1020,7 @@ async function pollTick() {
       const images = await Api.listImages(state.currentBoardId);
       if (sig(images, IMAGE_SIG_KEYS) !== sig(state.images, IMAGE_SIG_KEYS)) {
         state.images = images;
+        writeCache('mb.cache.images.' + state.currentBoardId, state.images);
         renderCategoryBar();
         renderBoard();
       }
@@ -987,6 +1028,7 @@ async function pollTick() {
       const bin = await Api.listBin();
       if (sig(bin, IMAGE_SIG_KEYS) !== sig(state.binImages, IMAGE_SIG_KEYS)) {
         state.binImages = bin;
+        writeCache('mb.cache.bin', state.binImages);
         renderBoard();
       }
     }
@@ -1005,17 +1047,42 @@ async function init() {
   initTopbar();
   initUpload();
   initKeyboard();
-
-  state.boards = await Api.listBoards();
-  if (!state.boards.length) {
-    const board = await Api.createBoard({});
-    state.boards = [board];
-  }
-  state.categories = await Api.listCategories();
+  setSidebarOpen(window.innerWidth > MOBILE_BREAKPOINT);
 
   const savedBoard = localStorage.getItem('mb.activeBoard');
-  const startBoard = boardById(savedBoard) ? savedBoard : state.boards[0].id;
-  await selectBoard(startBoard);
+
+  // Paint instantly from last visit's data (if any) so the UI never sits
+  // blank while the network request below is in flight.
+  const cachedBoards = readCache('mb.cache.boards');
+  if (cachedBoards && cachedBoards.length) {
+    state.boards = cachedBoards;
+    state.categories = readCache('mb.cache.categories') || [];
+    const startBoard = boardById(savedBoard) ? savedBoard : state.boards[0].id;
+    state.currentView = 'board';
+    state.currentBoardId = startBoard;
+    state.currentCategoryId = 'all';
+    state.images = readCache('mb.cache.images.' + startBoard) || [];
+    renderSidebar();
+    renderCategoryBar();
+    renderBoard();
+  }
+
+  try {
+    state.boards = await Api.listBoards();
+    if (!state.boards.length) {
+      const board = await Api.createBoard({});
+      state.boards = [board];
+    }
+    state.categories = await Api.listCategories();
+    writeCache('mb.cache.boards', state.boards);
+    writeCache('mb.cache.categories', state.categories);
+
+    const startBoard = boardById(savedBoard) ? savedBoard : state.boards[0].id;
+    await selectBoard(startBoard);
+  } catch (err) {
+    if (!cachedBoards) throw err; // nothing cached to fall back on — surface the real error
+    console.error('Background refresh failed, showing last cached data', err);
+  }
 
   startPolling();
 }
