@@ -63,18 +63,20 @@ module.exports = async function handler(req, res) {
         contents: [{
           parts: [
             { text: MOCKUP_PROMPT(mockupItem.name) },
-            { inline_data: { mime_type: itemImg.mimeType, data: itemImg.base64 } },
-            { inline_data: { mime_type: designImg.mimeType, data: designImg.base64 } },
+            { inlineData: { mimeType: itemImg.mimeType, data: itemImg.base64 } },
+            { inlineData: { mimeType: designImg.mimeType, data: designImg.base64 } },
           ],
         }],
-        generationConfig: { responseModalities: ['IMAGE'] },
+        generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
       }),
     });
 
     if (!geminiRes.ok) {
       const errText = await geminiRes.text().catch(() => '');
       console.error('Gemini API error', geminiRes.status, errText);
-      return send(res, 502, { error: 'AI mockup generation failed. Check GEMINI_API_KEY and the model name.' });
+      let detail = errText;
+      try { detail = JSON.parse(errText)?.error?.message || errText; } catch { /* not JSON, use raw text */ }
+      return send(res, 502, { error: `Gemini API error (${geminiRes.status}): ${detail}`.slice(0, 300) });
     }
 
     const geminiData = await geminiRes.json();
