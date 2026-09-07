@@ -26,6 +26,10 @@ signed-in team, with an activity log of who did what.
 - Live sync — changes made by others show up within ~15 seconds via
   lightweight polling
 - Multi-select for bulk download, move, and delete
+- **AI mockups** — upload a blank product photo (t-shirt, mug, bag, etc.) once
+  as a reusable "mockup item," then pick one plus a design already on the
+  board to generate a composited product mockup via the Gemini API; the
+  result is added to the board like any other image
 
 ## Tech
 
@@ -78,6 +82,23 @@ OAuth client, since that can only be created from Google's own dashboard:
 Every visitor now has to sign in with Google before seeing anything. Sign-in
 state is a signed cookie, not a database session — no extra query per
 request.
+
+## Setting up AI mockups
+
+Add one more env var:
+
+- `GEMINI_API_KEY` — a Gemini API key from
+  [Google AI Studio](https://aistudio.google.com/apikey)
+
+The generator calls `gemini-3.1-flash-lite-image` (the model named in the
+brief this was built from —
+https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite-image).
+I couldn't reach that docs page from this build environment (Google domains
+are blocked here) to double-check the exact model id or response shape, so
+this uses Gemini's standard `generateContent` image contract, which has held
+steady across their other image models. If the first real mockup generation
+fails, check the Vercel function logs for `api/mockup/generate` — a wrong
+model id or an unexpected response shape would show up there first.
 
 ## Production branch
 

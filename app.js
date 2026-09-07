@@ -82,6 +82,11 @@ const Api = {
   deleteImage: (id) => request(`/api/images${qs(id)}`, { method: 'DELETE' }),
 
   listActivity: () => request('/api/activity'),
+
+  listMockupItems: () => request('/api/mockup-items'),
+  uploadMockupItem: (formData) => request('/api/mockup-items', { method: 'POST', body: formData }),
+  deleteMockupItem: (id) => request(`/api/mockup-items${qs(id)}`, { method: 'DELETE' }),
+  generateMockup: (body) => request('/api/mockup/generate', { method: 'POST', ...jsonBody(body) }),
 };
 
 // Deliberately bypasses request()'s auto-reload-on-401 — an unauthenticated
@@ -1082,6 +1087,7 @@ const ACTIVITY_VERBS = {
   upload_image: (a) => `added <b>${escapeHtml(a.targetName)}</b> to <b>${escapeHtml(a.boardName)}</b>`,
   delete_image: (a) => `deleted <b>${escapeHtml(a.targetName)}</b>`,
   move_image: (a) => `moved <b>${escapeHtml(a.targetName)}</b> to <b>${escapeHtml(a.boardName)}</b>`,
+  create_mockup: (a) => `generated <b>${escapeHtml(a.targetName)}</b> in <b>${escapeHtml(a.boardName)}</b>`,
 };
 
 function describeActivity(a) {
@@ -1119,6 +1125,133 @@ function closeActivityPanel() {
   panel.setAttribute('aria-hidden', 'true');
 }
 
+/* ------------------------------- AI mockup generator ------------------------------- */
+
+const mockupState = { items: [], selectedItemId: null, selectedDesignId: null };
+
+async function openMockupModal() {
+  if (!state.images.length) {
+    showToast('Add an image to this moodboard first — that becomes the design.');
+    return;
+  }
+  mockupState.selectedItemId = null;
+  mockupState.selectedDesignId = null;
+  $('#mockupModalBackdrop').hidden = false;
+  renderMockupDesignGrid();
+  try {
+    mockupState.items = await Api.listMockupItems();
+  } catch (err) {
+    mockupState.items = [];
+    console.error('Failed to load mockup items', err);
+  }
+  renderMockupItemGrid();
+  updateMockupGenerateBtn();
+}
+
+function closeMockupModal() {
+  $('#mockupModalBackdrop').hidden = true;
+}
+
+function updateMockupGenerateBtn() {
+  $('#mockupGenerateBtn').disabled = !(mockupState.selectedItemId && mockupState.selectedDesignId);
+}
+
+function renderMockupItemGrid() {
+  const grid = $('#mockupItemGrid');
+  grid.innerHTML = '';
+  mockupState.items.forEach((item) => {
+    const tile = document.createElement('div');
+    tile.className = 'mockup-tile' + (mockupState.selectedItemId === item.id ? ' selected' : '');
+    tile.title = item.name;
+    tile.innerHTML = `<img src="${item.imageUrl}" alt="${escapeHtml(item.name)}">`;
+    tile.addEventListener('click', () => {
+      mockupState.selectedItemId = item.id;
+      renderMockupItemGrid();
+      updateMockupGenerateBtn();
+    });
+    grid.appendChild(tile);
+  });
+  const addTile = document.createElement('button');
+  addTile.className = 'mockup-tile mockup-tile-add';
+  addTile.title = 'Upload a new mockup item';
+  addTile.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  addTile.addEventListener('click', () => $('#mockupItemFileInput').click());
+  grid.appendChild(addTile);
+}
+
+function renderMockupDesignGrid() {
+  const grid = $('#mockupDesignGrid');
+  grid.innerHTML = '';
+  state.images.forEach((image) => {
+    const tile = document.createElement('div');
+    tile.className = 'mockup-tile' + (mockupState.selectedDesignId === image.id ? ' selected' : '');
+    tile.title = image.name;
+    tile.innerHTML = `<img src="${image.thumbUrl}" alt="${escapeHtml(image.name)}">`;
+    tile.addEventListener('click', () => {
+      mockupState.selectedDesignId = image.id;
+      renderMockupDesignGrid();
+      updateMockupGenerateBtn();
+    });
+    grid.appendChild(tile);
+  });
+}
+
+async function uploadMockupItemFile(file) {
+  const form = new FormData();
+  form.append('name', file.name.replace(/\.[^/.]+$/, '') || 'Mockup item');
+  form.append('image', file);
+  try {
+    const item = await Api.uploadMockupItem(form);
+    mockupState.items.unshift(item);
+    mockupState.selectedItemId = item.id;
+    renderMockupItemGrid();
+    updateMockupGenerateBtn();
+  } catch (err) {
+    showToast('Failed to upload mockup item');
+    console.error('Mockup item upload failed', err);
+  }
+}
+
+async function generateMockup() {
+  const btn = $('#mockupGenerateBtn');
+  btn.disabled = true;
+  btn.textContent = 'Generating…';
+  $('#mockupCancelBtn').disabled = true;
+  try {
+    const image = await Api.generateMockup({
+      mockupItemId: mockupState.selectedItemId,
+      designImageId: mockupState.selectedDesignId,
+      boardId: state.currentBoardId,
+    });
+    state.images.unshift(image);
+    await refreshBoards();
+    renderSidebar();
+    renderCategoryBar();
+    renderBoard();
+    closeMockupModal();
+    showToast('Mockup added to the board');
+  } catch (err) {
+    showToast(err.message || 'Mockup generation failed');
+    console.error('Mockup generation failed', err);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Generate';
+    $('#mockupCancelBtn').disabled = false;
+  }
+}
+
+function initMockup() {
+  $('#mockupBtn').addEventListener('click', openMockupModal);
+  $('#mockupCancelBtn').addEventListener('click', closeMockupModal);
+  $('#mockupModalBackdrop').addEventListener('click', (e) => { if (e.target === $('#mockupModalBackdrop')) closeMockupModal(); });
+  $('#mockupGenerateBtn').addEventListener('click', generateMockup);
+  $('#mockupItemFileInput').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) uploadMockupItemFile(file);
+    e.target.value = '';
+  });
+}
+
 function initKeyboard() {
   document.addEventListener('keydown', (e) => {
     if ($('#lightbox').classList.contains('open')) {
@@ -1129,6 +1262,10 @@ function initKeyboard() {
     }
     if (!$('#activityPanel').hidden) {
       if (e.key === 'Escape') closeActivityPanel();
+      return;
+    }
+    if (!$('#mockupModalBackdrop').hidden) {
+      if (e.key === 'Escape') closeMockupModal();
       return;
     }
     if (!$('#modalBackdrop').hidden) return;
@@ -1212,6 +1349,7 @@ async function init() {
   initTopbar();
   initUpload();
   initKeyboard();
+  initMockup();
   setSidebarOpen(window.innerWidth > MOBILE_BREAKPOINT);
 
   // Sign-in is required before anything else renders — including cached

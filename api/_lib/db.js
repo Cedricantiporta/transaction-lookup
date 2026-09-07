@@ -88,6 +88,14 @@ function ensureSchema() {
         )
       `;
       await sql`CREATE INDEX IF NOT EXISTS activity_log_created_idx ON activity_log(created_at DESC)`;
+      await sql`
+        CREATE TABLE IF NOT EXISTS mockup_items (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          image_url TEXT NOT NULL,
+          created_at BIGINT NOT NULL
+        )
+      `;
     })().catch((err) => {
       schemaReady = null; // allow retry on next request if it failed
       throw err;
@@ -118,6 +126,10 @@ function imageRow(r) {
     createdAt: Number(r.created_at),
     dominantColor: r.dominant_color,
   };
+}
+
+function mockupItemRow(r) {
+  return { id: r.id, name: r.name, imageUrl: r.image_url, createdAt: Number(r.created_at) };
 }
 
 function activityRow(r) {
@@ -159,4 +171,4 @@ function send(res, status, data) {
   res.status(status).json(data);
 }
 
-module.exports = { sql, ensureSchema, boardRow, categoryRow, imageRow, activityRow, readJson, send };
+module.exports = { sql, ensureSchema, boardRow, categoryRow, imageRow, activityRow, mockupItemRow, readJson, send };

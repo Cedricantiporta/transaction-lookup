@@ -85,6 +85,11 @@
       Activity
     </button>
 
+    <button class="new-board-btn" id="mockupBtn">
+      <svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 8V6a2 2 0 0 1 2-2h2m10 0h2a2 2 0 0 1 2 2v2M4 16v2a2 2 0 0 0 2 2h2m10 0h2a2 2 0 0 0 2-2v-2M9 9h6v6H9z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Create Mockup
+    </button>
+
     <div class="sidebar-profile" id="sidebarProfile" hidden>
       <img class="sidebar-profile-avatar" id="profileAvatar" alt="" hidden>
       <span class="sidebar-profile-avatar sidebar-profile-avatar-fallback" id="profileAvatarFallback" hidden></span>
@@ -231,6 +236,30 @@
       </svg>
       Sign in with Google
     </a>
+  </div>
+</div>
+
+<!-- Mockup generator -->
+<div class="modal-backdrop" id="mockupModalBackdrop" hidden>
+  <div class="modal mockup-modal">
+    <h3>Create Mockup</h3>
+
+    <div class="mockup-section">
+      <div class="mockup-section-label">Mockup item</div>
+      <div class="mockup-grid" id="mockupItemGrid"></div>
+    </div>
+
+    <div class="mockup-section">
+      <div class="mockup-section-label">Design (from this moodboard)</div>
+      <div class="mockup-grid" id="mockupDesignGrid"></div>
+    </div>
+
+    <input type="file" id="mockupItemFileInput" accept="image/*" hidden>
+
+    <div class="modal-actions">
+      <button class="ghost-btn" id="mockupCancelBtn">Cancel</button>
+      <button class="primary-btn" id="mockupGenerateBtn" disabled>Generate</button>
+    </div>
   </div>
 </div>
 
