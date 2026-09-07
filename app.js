@@ -108,6 +108,77 @@ async function fileToFull(file) {
   return result;
 }
 
+async function computeDominantColor(file) {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const size = 16;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bitmap, 0, 0, size, size);
+    bitmap.close();
+    const { data } = ctx.getImageData(0, 0, size, size);
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] < 128) continue; // skip mostly-transparent pixels
+      r += data[i]; g += data[i + 1]; b += data[i + 2];
+      n++;
+    }
+    if (!n) return null;
+    r = Math.round(r / n); g = Math.round(g / n); b = Math.round(b / n);
+    return '#' + [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return null;
+  }
+}
+
+/* ------------------------------- Color filter buckets ------------------------------- */
+
+const COLOR_BUCKETS = [
+  { key: 'red', label: 'Red', swatch: '#e0483e', hue: [345, 15] },
+  { key: 'orange', label: 'Orange', swatch: '#e08a3e', hue: [15, 45] },
+  { key: 'yellow', label: 'Yellow', swatch: '#e0c53e', hue: [45, 65] },
+  { key: 'green', label: 'Green', swatch: '#5cb85c', hue: [65, 160] },
+  { key: 'teal', label: 'Teal', swatch: '#3ea0a0', hue: [160, 195] },
+  { key: 'blue', label: 'Blue', swatch: '#3e7fe0', hue: [195, 255] },
+  { key: 'purple', label: 'Purple', swatch: '#8a5ce0', hue: [255, 290] },
+  { key: 'pink', label: 'Pink', swatch: '#e05ca0', hue: [290, 345] },
+  { key: 'brown', label: 'Brown', swatch: '#8a5a3c' },
+  { key: 'black', label: 'Black', swatch: '#2b2b2d' },
+  { key: 'white', label: 'White', swatch: '#f0f0f0' },
+  { key: 'gray', label: 'Gray', swatch: '#9a9a9e' },
+];
+const COLOR_BUCKETS_BY_KEY = Object.fromEntries(COLOR_BUCKETS.map((b) => [b.key, b]));
+
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0;
+  const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+  }
+  return { h, s: s * 100, l: l * 100 };
+}
+
+function bucketForColor(hex) {
+  if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) return null;
+  const n = parseInt(hex.slice(1), 16);
+  const { h, s, l } = rgbToHsl((n >> 16) & 255, (n >> 8) & 255, n & 255);
+  if (l < 12) return 'black';
+  if (l > 92 && s < 12) return 'white';
+  if (s < 14) return 'gray';
+  if (l < 32 && h >= 15 && h < 55) return 'brown';
+  const hued = COLOR_BUCKETS.find(({ hue }) => hue && (hue[0] <= hue[1] ? (h >= hue[0] && h < hue[1]) : (h >= hue[0] || h < hue[1])));
+  return hued ? hued.key : 'gray';
+}
+
 /* ------------------------------- App state ------------------------------- */
 
 const state = {
@@ -116,6 +187,7 @@ const state = {
   images: [],
   currentBoardId: null,
   currentCategoryId: 'all',
+  currentColorFilter: null,
   viewMode: localStorage.getItem('mb.viewMode') || 'masonry',
   search: '',
   selection: new Set(),
@@ -175,7 +247,7 @@ function renderSidebar() {
       <span class="board-item-name" spellcheck="false">${escapeHtml(board.name)}</span>
       <span class="board-item-count">${board.imageCount ?? ''}</span>
       <button class="board-item-menu-btn" aria-label="Board options">
-        <svg viewBox="0 0 24 24" width="14" height="14"><circle cx="12" cy="5" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="19" r="1.6" fill="currentColor"/></svg>
+        <svg viewBox="0 0 24 24" width="17" height="17"><circle cx="12" cy="5" r="2.1" fill="currentColor"/><circle cx="12" cy="12" r="2.1" fill="currentColor"/><circle cx="12" cy="19" r="2.1" fill="currentColor"/></svg>
       </button>`;
 
     item.addEventListener('click', (e) => {
@@ -246,6 +318,26 @@ function renderCategoryBar() {
   addChip.innerHTML = '+ New category';
   addChip.addEventListener('click', () => promptNewCategory());
   bar.appendChild(addChip);
+
+  const presentBuckets = new Set(state.images.map((i) => bucketForColor(i.dominantColor)).filter(Boolean));
+  if (presentBuckets.size > 1) {
+    const divider = document.createElement('div');
+    divider.className = 'category-bar-divider';
+    bar.appendChild(divider);
+    COLOR_BUCKETS.filter((b) => presentBuckets.has(b.key)).forEach((b) => {
+      const swatch = document.createElement('button');
+      swatch.className = 'color-swatch-btn' + (state.currentColorFilter === b.key ? ' active' : '');
+      swatch.title = `Filter by ${b.label}`;
+      swatch.setAttribute('aria-label', `Filter by ${b.label}`);
+      swatch.style.setProperty('--swatch-color', b.swatch);
+      swatch.addEventListener('click', () => {
+        state.currentColorFilter = state.currentColorFilter === b.key ? null : b.key;
+        renderCategoryBar();
+        renderBoard();
+      });
+      bar.appendChild(swatch);
+    });
+  }
 }
 
 function makeChip(label, active, color, count) {
@@ -259,6 +351,9 @@ function currentVisibleImages() {
   let list = state.images;
   if (state.currentCategoryId !== 'all') {
     list = list.filter((i) => i.categoryId === state.currentCategoryId);
+  }
+  if (state.currentColorFilter) {
+    list = list.filter((i) => bucketForColor(i.dominantColor) === state.currentColorFilter);
   }
   if (state.search.trim()) {
     const q = state.search.trim().toLowerCase();
@@ -384,6 +479,7 @@ function updateSelectionBar() {
     <div class="selection-bar-divider"></div>
     <div class="selection-bar-actions">
       <button class="ghost-btn" data-a="download">Download</button>
+      <button class="ghost-btn" data-a="move">Move to</button>
       <button class="ghost-btn danger" data-a="delete">Delete</button>
       <button class="icon-btn" data-a="clear" aria-label="Clear selection">
         <svg viewBox="0 0 24 24" width="14" height="14"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
@@ -393,6 +489,14 @@ function updateSelectionBar() {
   const ids = () => Array.from(state.selection);
   bar.querySelector('[data-a="download"]').addEventListener('click', () => ids().forEach((id) => downloadImage(id)));
   bar.querySelector('[data-a="delete"]').addEventListener('click', () => confirmDeleteImages(ids()));
+  bar.querySelector('[data-a="move"]').addEventListener('click', (e) => {
+    const otherBoards = state.boards.filter((b) => b.id !== state.currentBoardId);
+    if (!otherBoards.length) { showToast('No other moodboards to move to'); return; }
+    const rect = e.currentTarget.getBoundingClientRect();
+    showContextMenu(rect.left, rect.top - 8 - otherBoards.length * 34, otherBoards.map((b) => ({
+      label: b.name, swatch: b.color, onClick: () => moveImagesToBoard(ids(), b.id),
+    })));
+  });
 }
 
 /* ------------------------------- Board CRUD ------------------------------- */
@@ -528,15 +632,17 @@ async function addImages(files, boardId = state.currentBoardId) {
     const previewUrl = URL.createObjectURL(file);
     setUploadProgress({ current: i, total, previewUrl, fileName: file.name });
     try {
-      const [{ blob: thumbBlob }, { blob: fullBlob, width, height }] = await Promise.all([
+      const [{ blob: thumbBlob }, { blob: fullBlob, width, height }, dominantColor] = await Promise.all([
         fileToThumb(file),
         fileToFull(file),
+        computeDominantColor(file),
       ]);
       const form = new FormData();
       form.append('boardId', boardId);
       form.append('name', file.name.replace(/\.[^/.]+$/, '') || 'Untitled');
       form.append('width', width);
       form.append('height', height);
+      form.append('color', dominantColor || '');
       form.append('thumb', thumbBlob, 'thumb.jpg');
       form.append('full', fullBlob, 'full.jpg');
       const image = await Api.uploadImage(form);
@@ -588,6 +694,7 @@ async function moveImagesToBoard(ids, boardId) {
   if (!images.length) return;
   await Promise.all(ids.map((id) => Api.patchImage(id, { boardId, categoryId: null })));
   state.images = state.images.filter((i) => !ids.includes(i.id));
+  state.selection.clear();
   await refreshBoards();
   renderSidebar();
   renderBoard();
@@ -612,6 +719,7 @@ function downloadImage(id) {
 
 function showCardContextMenu(x, y, image) {
   const cats = state.categories.filter((c) => c.boardId === image.boardId);
+  const otherBoards = state.boards.filter((b) => b.id !== image.boardId);
   const items = [
     { label: 'View Full Screen', onClick: () => openLightbox(currentVisibleImages(), currentVisibleImages().findIndex((i) => i.id === image.id)) },
     { label: 'Download', onClick: () => downloadImage(image.id) },
@@ -626,9 +734,14 @@ function showCardContextMenu(x, y, image) {
         await setImageCategory(image.id, cat.id);
       } },
     ] },
-    { sep: true },
-    { label: 'Delete', danger: true, onClick: () => confirmDeleteImages([image.id]) },
   ];
+  if (otherBoards.length) {
+    items.push({ label: 'Move to', sub: otherBoards.map((b) => ({
+      label: b.name, swatch: b.color, onClick: () => moveImagesToBoard([image.id], b.id),
+    })) });
+  }
+  items.push({ sep: true });
+  items.push({ label: 'Delete', danger: true, onClick: () => confirmDeleteImages([image.id]) });
   showContextMenu(x, y, items);
 }
 

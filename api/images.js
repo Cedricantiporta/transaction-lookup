@@ -38,6 +38,8 @@ module.exports = async function handler(req, res) {
     const name = (first(fields.name) || 'Untitled').toString().trim() || 'Untitled';
     const width = Number(first(fields.width)) || null;
     const height = Number(first(fields.height)) || null;
+    const colorField = (first(fields.color) || '').toString();
+    const dominantColor = /^#[0-9a-fA-F]{6}$/.test(colorField) ? colorField : null;
     const thumbFile = first(files.thumb);
     const fullFile = first(files.full);
 
@@ -59,11 +61,11 @@ module.exports = async function handler(req, res) {
       const image = {
         id, boardId, categoryId: null, name, width, height,
         size: fullFile.size, thumbUrl: thumbBlob.url, fullUrl: fullBlob.url,
-        createdAt: Date.now(),
+        createdAt: Date.now(), dominantColor,
       };
       await sql`
-        INSERT INTO images (id, board_id, category_id, name, width, height, size, thumb_url, full_url, created_at)
-        VALUES (${image.id}, ${image.boardId}, NULL, ${image.name}, ${image.width}, ${image.height}, ${image.size}, ${image.thumbUrl}, ${image.fullUrl}, ${image.createdAt})
+        INSERT INTO images (id, board_id, category_id, name, width, height, size, thumb_url, full_url, created_at, dominant_color)
+        VALUES (${image.id}, ${image.boardId}, NULL, ${image.name}, ${image.width}, ${image.height}, ${image.size}, ${image.thumbUrl}, ${image.fullUrl}, ${image.createdAt}, ${image.dominantColor})
       `;
       return send(res, 201, image);
     } catch (err) {
