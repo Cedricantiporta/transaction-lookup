@@ -40,6 +40,22 @@ The database schema is created automatically on first request
 
 That's it — the app provisions its own tables on first use.
 
+## Production branch
+
+Vercel's **Production Branch** setting (Project Settings → Git) should point
+at `main`, which is the only branch meant to run this app's shared
+Postgres + Blob backend. If a preview build from another branch is ever
+manually promoted to Production, it overrides `main`'s deployment — Vercel
+still records `main` as the intended build, but the promoted branch's code
+is what's actually live until something re-deploys `main` (a new commit,
+or a manual redeploy of an existing `main`-based build).
+
+In particular, watch out for experimental branches that intentionally
+diverge from the backend (e.g. a local-storage-only/offline variant) —
+promoting one of those to Production silently stops the app from reading
+`DATABASE_URL` or writing to Blob, with no error until someone tries an
+action that hits the API.
+
 ## Running locally
 
 ```
