@@ -6,8 +6,8 @@ module.exports = async function handler(req, res) {
 
   if (req.method === 'GET') {
     const { boardId } = req.query;
-    // No boardId = return every category (used once at startup so bin
-    // items from any board can still resolve their category badge).
+    // No boardId = return every category (fetched once at startup, then
+    // filtered client-side per board to avoid a round trip on every switch).
     const { rows } = boardId
       ? await sql`SELECT * FROM categories WHERE board_id = ${boardId} ORDER BY created_at ASC`
       : await sql`SELECT * FROM categories ORDER BY created_at ASC`;

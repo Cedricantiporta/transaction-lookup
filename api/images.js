@@ -17,14 +17,10 @@ module.exports = async function handler(req, res) {
   await ensureSchema();
 
   if (req.method === 'GET') {
-    const { boardId, bin } = req.query;
-    if (bin === '1') {
-      const { rows } = await sql`SELECT * FROM images WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`;
-      return send(res, 200, rows.map(imageRow));
-    }
-    if (!boardId) return send(res, 400, { error: 'Provide ?boardId= or ?bin=1' });
+    const { boardId } = req.query;
+    if (!boardId) return send(res, 400, { error: 'Provide ?boardId=' });
     const { rows } = await sql`
-      SELECT * FROM images WHERE board_id = ${boardId} AND deleted_at IS NULL ORDER BY created_at DESC
+      SELECT * FROM images WHERE board_id = ${boardId} ORDER BY created_at DESC
     `;
     return send(res, 200, rows.map(imageRow));
   }
@@ -63,11 +59,11 @@ module.exports = async function handler(req, res) {
       const image = {
         id, boardId, categoryId: null, name, width, height,
         size: fullFile.size, thumbUrl: thumbBlob.url, fullUrl: fullBlob.url,
-        createdAt: Date.now(), deletedAt: null,
+        createdAt: Date.now(),
       };
       await sql`
-        INSERT INTO images (id, board_id, category_id, name, width, height, size, thumb_url, full_url, created_at, deleted_at)
-        VALUES (${image.id}, ${image.boardId}, NULL, ${image.name}, ${image.width}, ${image.height}, ${image.size}, ${image.thumbUrl}, ${image.fullUrl}, ${image.createdAt}, NULL)
+        INSERT INTO images (id, board_id, category_id, name, width, height, size, thumb_url, full_url, created_at)
+        VALUES (${image.id}, ${image.boardId}, NULL, ${image.name}, ${image.width}, ${image.height}, ${image.size}, ${image.thumbUrl}, ${image.fullUrl}, ${image.createdAt})
       `;
       return send(res, 201, image);
     } catch (err) {
@@ -97,10 +93,6 @@ module.exports = async function handler(req, res) {
     }
     if (has('boardId')) {
       await sql`UPDATE images SET board_id = ${body.boardId} WHERE id = ${id}`;
-      touched = true;
-    }
-    if (has('deletedAt')) {
-      await sql`UPDATE images SET deleted_at = ${body.deletedAt} WHERE id = ${id}`;
       touched = true;
     }
     if (!touched) return send(res, 400, { error: 'Nothing to update' });

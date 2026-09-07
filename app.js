@@ -6,7 +6,6 @@
    with the link sees and edits the same boards.
    ============================================================ */
 
-const BIN_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, mirrors the server-side cron
 const THUMB_MAX_DIM = 720;
 const THUMB_QUALITY = 0.84;
 const FULL_MAX_DIM = 2200;
@@ -34,11 +33,6 @@ function formatBytes(bytes) {
   if (mb < 1) return `${(bytes / 1024).toFixed(0)} KB`;
   if (mb < 1024) return `${mb.toFixed(1)} MB`;
   return `${(mb / 1024).toFixed(2)} GB`;
-}
-
-function daysLeft(deletedAt) {
-  const remainMs = deletedAt + BIN_RETENTION_MS - Date.now();
-  return Math.max(0, Math.ceil(remainMs / (24 * 60 * 60 * 1000)));
 }
 
 function relativeDate(ts) {
@@ -79,11 +73,9 @@ const Api = {
   deleteCategory: (id) => request(`/api/categories${qs(id)}`, { method: 'DELETE' }),
 
   listImages: (boardId) => request(`/api/images?boardId=${encodeURIComponent(boardId)}`),
-  listBin: () => request('/api/images?bin=1'),
   uploadImage: (formData) => request('/api/images', { method: 'POST', body: formData }),
   patchImage: (id, body) => request(`/api/images${qs(id)}`, { method: 'PATCH', ...jsonBody(body) }),
-  deleteImageForever: (id) => request(`/api/images${qs(id)}`, { method: 'DELETE' }),
-  purgeNow: () => fetch('/api/cron/purge').catch(() => {}),
+  deleteImage: (id) => request(`/api/images${qs(id)}`, { method: 'DELETE' }),
 };
 
 /* ------------------------------- Image processing ------------------------------- */
@@ -121,10 +113,8 @@ async function fileToFull(file) {
 const state = {
   boards: [],
   categories: [],
-  images: [],           // active images for current board (not deleted)
-  binImages: [],         // all deleted images, across boards
+  images: [],
   currentBoardId: null,
-  currentView: 'board',  // 'board' | 'bin'
   currentCategoryId: 'all',
   viewMode: localStorage.getItem('mb.viewMode') || 'masonry',
   search: '',
@@ -148,7 +138,6 @@ function setSidebarOpen(open) {
 }
 
 async function selectBoard(boardId) {
-  state.currentView = 'board';
   state.currentBoardId = boardId;
   state.currentCategoryId = 'all';
   state.selection.clear();
@@ -172,27 +161,6 @@ async function selectBoard(boardId) {
   if (window.innerWidth <= MOBILE_BREAKPOINT) setSidebarOpen(false);
 }
 
-async function showBin() {
-  state.currentView = 'bin';
-  state.selection.clear();
-
-  const cachedBin = readCache('mb.cache.bin');
-  if (cachedBin) {
-    state.binImages = cachedBin;
-    renderSidebar();
-    renderCategoryBar();
-    renderBoard();
-  }
-
-  try { await Api.purgeNow(); } catch { /* best-effort */ }
-  state.binImages = await Api.listBin();
-  writeCache('mb.cache.bin', state.binImages);
-  renderSidebar();
-  renderCategoryBar();
-  renderBoard();
-  if (window.innerWidth <= MOBILE_BREAKPOINT) setSidebarOpen(false);
-}
-
 /* ------------------------------- Rendering ------------------------------- */
 
 function renderSidebar() {
@@ -200,7 +168,7 @@ function renderSidebar() {
   list.innerHTML = '';
   state.boards.forEach((board) => {
     const item = document.createElement('div');
-    item.className = 'board-item' + (state.currentView === 'board' && state.currentBoardId === board.id ? ' active' : '');
+    item.className = 'board-item' + (state.currentBoardId === board.id ? ' active' : '');
     item.dataset.boardId = board.id;
     item.innerHTML = `
       <span class="board-item-swatch" style="background:${board.color}"></span>
@@ -241,17 +209,9 @@ function renderSidebar() {
     list.appendChild(item);
   });
 
-  $('#binCount').hidden = state.binImages.length === 0;
-  $('#binCount').textContent = state.binImages.length;
-  $('#binBtn').classList.toggle('active', state.currentView === 'bin');
-
-  const active = state.currentView === 'board' ? boardById(state.currentBoardId) : null;
+  const active = boardById(state.currentBoardId);
   const titleEl = $('#boardTitle');
-  if (state.currentView === 'bin') {
-    titleEl.textContent = 'Bin';
-    titleEl.contentEditable = 'false';
-    $('#boardSubtitle').textContent = 'Items are permanently deleted after 30 days';
-  } else if (active) {
+  if (active) {
     titleEl.textContent = active.name;
     titleEl.contentEditable = 'true';
     $('#boardSubtitle').textContent = `${state.images.length} image${state.images.length === 1 ? '' : 's'}`;
@@ -261,8 +221,6 @@ function renderSidebar() {
 function renderCategoryBar() {
   const bar = $('#categoryBar');
   bar.innerHTML = '';
-  if (state.currentView !== 'board') { bar.hidden = true; return; }
-  bar.hidden = false;
 
   const cats = state.categories.filter((c) => c.boardId === state.currentBoardId);
   const allChip = makeChip('All', state.currentCategoryId === 'all', null, state.images.length);
@@ -298,9 +256,8 @@ function makeChip(label, active, color, count) {
 }
 
 function currentVisibleImages() {
-  const source = state.currentView === 'bin' ? state.binImages : state.images;
-  let list = source;
-  if (state.currentView === 'board' && state.currentCategoryId !== 'all') {
+  let list = state.images;
+  if (state.currentCategoryId !== 'all') {
     list = list.filter((i) => i.categoryId === state.currentCategoryId);
   }
   if (state.search.trim()) {
@@ -318,10 +275,7 @@ function renderBoard() {
 
   $('#emptyState').hidden = images.length > 0;
   if (images.length === 0) {
-    if (state.currentView === 'bin') {
-      $('#emptyTitle').textContent = 'Bin is empty';
-      $('#emptySubtitle').textContent = 'Images you move to the bin stay for 30 days before they’re gone for good.';
-    } else if (state.search.trim()) {
+    if (state.search.trim()) {
       $('#emptyTitle').textContent = 'No matches';
       $('#emptySubtitle').textContent = `Nothing found for "${state.search.trim()}".`;
     } else if (state.currentCategoryId !== 'all') {
@@ -347,11 +301,9 @@ function renderCard(image, idx, listRef) {
   card.className = 'card' + (state.selection.has(image.id) ? ' selected' : '');
   card.dataset.id = image.id;
   card.style.animationDelay = `${Math.min(idx, 24) * 18}ms`;
-  card.draggable = state.currentView === 'board';
+  card.draggable = true;
 
   const cat = categoryFor(image);
-  const isBin = state.currentView === 'bin';
-  const board = isBin ? boardById(image.boardId) : null;
 
   card.innerHTML = `
     <div class="card-media">
@@ -361,21 +313,16 @@ function renderCard(image, idx, listRef) {
       </div>
       <div class="card-overlay">
         <div class="card-top-actions">
-          ${!isBin ? `<button class="card-action" data-action="menu" title="More"><svg viewBox="0 0 24 24" width="13" height="13"><circle cx="12" cy="5" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="19" r="1.7" fill="currentColor"/></svg></button>` : ''}
-          ${isBin
-            ? `<button class="card-action" data-action="restore" title="Restore"><svg viewBox="0 0 24 24" width="13" height="13"><path d="M4 4v6h6M4.5 13a8 8 0 1 0 2-8.4L4 10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-               <button class="card-action danger" data-action="delete-forever" title="Delete forever"><svg viewBox="0 0 24 24" width="13" height="13"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2m-9 0 1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`
-            : `<button class="card-action danger" data-action="bin" title="Move to bin"><svg viewBox="0 0 24 24" width="13" height="13"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2m-9 0 1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`}
+          <button class="card-action" data-action="menu" title="More"><svg viewBox="0 0 24 24" width="13" height="13"><circle cx="12" cy="5" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="19" r="1.7" fill="currentColor"/></svg></button>
+          <button class="card-action danger" data-action="delete" title="Delete"><svg viewBox="0 0 24 24" width="13" height="13"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2m-9 0 1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         </div>
         <div class="card-bottom">
           <div class="card-name">${escapeHtml(image.name)}</div>
           <div class="card-tags">
             ${cat ? `<span class="card-cat-badge" style="background:${cat.color}dd">${escapeHtml(cat.name)}</span>` : ''}
-            ${board ? `<span class="card-cat-badge" style="background:${board.color}dd">${escapeHtml(board.name)}</span>` : ''}
           </div>
         </div>
       </div>
-      ${isBin ? `<span class="bin-days-badge">${daysLeft(image.deletedAt)}d left</span>` : ''}
     </div>`;
 
   card.addEventListener('click', (e) => {
@@ -405,9 +352,7 @@ function renderCard(image, idx, listRef) {
 function handleCardAction(e, image) {
   const action = e.target.closest('.card-action').dataset.action;
   e.stopPropagation();
-  if (action === 'bin') moveImagesToBin([image.id]);
-  else if (action === 'restore') restoreImages([image.id]);
-  else if (action === 'delete-forever') confirmDeleteForever([image.id]);
+  if (action === 'delete') confirmDeleteImages([image.id]);
   else if (action === 'menu') showCardContextMenu(e.clientX, e.clientY, image);
 }
 
@@ -434,29 +379,20 @@ function updateSelectionBar() {
   const count = state.selection.size;
   bar.classList.toggle('visible', count > 0);
   if (count === 0) { bar.innerHTML = ''; return; }
-  const isBin = state.currentView === 'bin';
   bar.innerHTML = `
     <span class="selection-bar-count">${count} selected</span>
     <div class="selection-bar-divider"></div>
     <div class="selection-bar-actions">
-      ${isBin
-        ? `<button class="ghost-btn" data-a="restore">Restore</button>
-           <button class="ghost-btn danger" data-a="delete-forever">Delete Forever</button>`
-        : `<button class="ghost-btn" data-a="download">Download</button>
-           <button class="ghost-btn danger" data-a="bin">Move to Bin</button>`}
+      <button class="ghost-btn" data-a="download">Download</button>
+      <button class="ghost-btn danger" data-a="delete">Delete</button>
       <button class="icon-btn" data-a="clear" aria-label="Clear selection">
         <svg viewBox="0 0 24 24" width="14" height="14"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
       </button>
     </div>`;
   bar.querySelector('[data-a="clear"]').addEventListener('click', clearSelection);
   const ids = () => Array.from(state.selection);
-  if (isBin) {
-    bar.querySelector('[data-a="restore"]').addEventListener('click', () => restoreImages(ids()));
-    bar.querySelector('[data-a="delete-forever"]').addEventListener('click', () => confirmDeleteForever(ids()));
-  } else {
-    bar.querySelector('[data-a="download"]').addEventListener('click', () => ids().forEach((id) => downloadImage(id)));
-    bar.querySelector('[data-a="bin"]').addEventListener('click', () => moveImagesToBin(ids()));
-  }
+  bar.querySelector('[data-a="download"]').addEventListener('click', () => ids().forEach((id) => downloadImage(id)));
+  bar.querySelector('[data-a="delete"]').addEventListener('click', () => confirmDeleteImages(ids()));
 }
 
 /* ------------------------------- Board CRUD ------------------------------- */
@@ -553,7 +489,7 @@ async function deleteCategory(catId) {
 }
 
 async function setImageCategory(imageId, categoryId) {
-  const image = state.images.find((i) => i.id === imageId) || state.binImages.find((i) => i.id === imageId);
+  const image = state.images.find((i) => i.id === imageId);
   if (!image) return;
   const updated = await Api.patchImage(imageId, { categoryId: categoryId || null });
   Object.assign(image, updated);
@@ -604,7 +540,7 @@ async function addImages(files, boardId = state.currentBoardId) {
       form.append('thumb', thumbBlob, 'thumb.jpg');
       form.append('full', fullBlob, 'full.jpg');
       const image = await Api.uploadImage(form);
-      if (boardId === state.currentBoardId && state.currentView === 'board') {
+      if (boardId === state.currentBoardId) {
         state.images.unshift(image);
       }
       added++;
@@ -627,46 +563,24 @@ async function addImages(files, boardId = state.currentBoardId) {
   showToast(`${added} image${added === 1 ? '' : 's'} added${failed ? ` · ${failed} failed` : ''}`);
 }
 
-/* ------------------------------- Bin operations ------------------------------- */
+/* ------------------------------- Delete ------------------------------- */
 
-async function moveImagesToBin(ids) {
-  const deletedAt = Date.now();
-  await Promise.all(ids.map((id) => Api.patchImage(id, { deletedAt })));
+async function confirmDeleteImages(ids) {
+  const ok = await showConfirm({
+    title: `Delete ${ids.length} image${ids.length > 1 ? 's' : ''}?`,
+    body: 'This can’t be undone.',
+    confirmLabel: 'Delete',
+  });
+  if (!ok) return false;
+  await Promise.all(ids.map((id) => Api.deleteImage(id)));
   state.images = state.images.filter((i) => !ids.includes(i.id));
   state.selection.clear();
-  await Promise.all([refreshBoards(), (async () => { state.binImages = await Api.listBin(); })()]);
-  renderSidebar();
-  renderBoard();
-  showToast(`Moved ${ids.length} image${ids.length > 1 ? 's' : ''} to Bin`, {
-    actionLabel: 'Undo',
-    onAction: async () => { await restoreImages(ids); },
-  });
-}
-
-async function restoreImages(ids) {
-  await Promise.all(ids.map((id) => Api.patchImage(id, { deletedAt: null })));
-  state.binImages = state.binImages.filter((i) => !ids.includes(i.id));
-  state.selection.clear();
   await refreshBoards();
-  if (state.currentView === 'board') state.images = await Api.listImages(state.currentBoardId);
   renderSidebar();
+  renderCategoryBar();
   renderBoard();
-  showToast(`Restored ${ids.length} image${ids.length > 1 ? 's' : ''}`);
-}
-
-async function confirmDeleteForever(ids) {
-  const ok = await showConfirm({
-    title: `Delete ${ids.length} image${ids.length > 1 ? 's' : ''} forever?`,
-    body: 'This can’t be undone.',
-    confirmLabel: 'Delete Forever',
-  });
-  if (!ok) return;
-  await Promise.all(ids.map((id) => Api.deleteImageForever(id)));
-  state.binImages = state.binImages.filter((i) => !ids.includes(i.id));
-  state.selection.clear();
-  renderSidebar();
-  renderBoard();
-  showToast(`Deleted ${ids.length} image${ids.length > 1 ? 's' : ''} forever`);
+  showToast(`Deleted ${ids.length} image${ids.length > 1 ? 's' : ''}`);
+  return true;
 }
 
 async function moveImagesToBoard(ids, boardId) {
@@ -682,7 +596,7 @@ async function moveImagesToBoard(ids, boardId) {
 }
 
 function downloadImage(id) {
-  const image = state.images.find((i) => i.id === id) || state.binImages.find((i) => i.id === id);
+  const image = state.images.find((i) => i.id === id);
   if (!image) return;
   const a = document.createElement('a');
   a.href = image.fullUrl;
@@ -697,15 +611,12 @@ function downloadImage(id) {
 /* ------------------------------- Context menu (cards) ------------------------------- */
 
 function showCardContextMenu(x, y, image) {
-  const isBin = state.currentView === 'bin';
+  const cats = state.categories.filter((c) => c.boardId === image.boardId);
   const items = [
     { label: 'View Full Screen', onClick: () => openLightbox(currentVisibleImages(), currentVisibleImages().findIndex((i) => i.id === image.id)) },
     { label: 'Download', onClick: () => downloadImage(image.id) },
     { sep: true },
-  ];
-  if (!isBin) {
-    const cats = state.categories.filter((c) => c.boardId === image.boardId);
-    items.push({ label: 'Category', sub: [
+    { label: 'Category', sub: [
       ...cats.map((c) => ({ label: c.name, swatch: c.color, onClick: () => setImageCategory(image.id, c.id) })),
       { label: '+ New category…', onClick: async () => {
         const name = await showTextPrompt({ title: 'New category', placeholder: 'Category name' });
@@ -714,13 +625,10 @@ function showCardContextMenu(x, y, image) {
         state.categories.push(cat);
         await setImageCategory(image.id, cat.id);
       } },
-    ] });
-    items.push({ sep: true });
-    items.push({ label: 'Move to Bin', danger: true, onClick: () => moveImagesToBin([image.id]) });
-  } else {
-    items.push({ label: 'Restore', onClick: () => restoreImages([image.id]) });
-    items.push({ label: 'Delete Forever', danger: true, onClick: () => confirmDeleteForever([image.id]) });
-  }
+    ] },
+    { sep: true },
+    { label: 'Delete', danger: true, onClick: () => confirmDeleteImages([image.id]) },
+  ];
   showContextMenu(x, y, items);
 }
 
@@ -815,7 +723,6 @@ function renderLightbox() {
     `${image.width}×${image.height}px · ${formatBytes(image.size)}`,
     `Added ${relativeDate(image.createdAt)}`,
     board ? `In ${escapeHtml(board.name)}` : '',
-    image.deletedAt ? `In Bin · ${daysLeft(image.deletedAt)} days left` : '',
   ].filter(Boolean).join('<br>');
 
   const select = $('#lightboxCategorySelect');
@@ -824,11 +731,6 @@ function renderLightbox() {
 
   $('#lightboxPrev').disabled = lightboxIndex === 0;
   $('#lightboxNext').disabled = lightboxIndex === lightboxList.length - 1;
-
-  const binBtn = $('#lightboxBin');
-  binBtn.innerHTML = image.deletedAt
-    ? `<svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 4v6h6M4.5 13a8 8 0 1 0 2-8.4L4 10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg> Restore`
-    : `<svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2m-9 0 1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg> Move to Bin`;
 }
 
 $('#lightboxClose').addEventListener('click', closeLightbox);
@@ -836,11 +738,9 @@ $('#lightboxBackdrop').addEventListener('click', closeLightbox);
 $('#lightboxPrev').addEventListener('click', () => navLightbox(-1));
 $('#lightboxNext').addEventListener('click', () => navLightbox(1));
 $('#lightboxDownload').addEventListener('click', () => downloadImage(lightboxList[lightboxIndex].id));
-$('#lightboxBin').addEventListener('click', async () => {
+$('#lightboxDelete').addEventListener('click', async () => {
   const image = lightboxList[lightboxIndex];
-  if (image.deletedAt) await restoreImages([image.id]);
-  else await moveImagesToBin([image.id]);
-  closeLightbox();
+  if (await confirmDeleteImages([image.id])) closeLightbox();
 });
 $('#lightboxCategorySelect').addEventListener('change', (e) => {
   setImageCategory(lightboxList[lightboxIndex].id, e.target.value || null);
@@ -923,22 +823,17 @@ function showTextPrompt({ title, placeholder = '', initial = '' }) {
 /* ------------------------------- Upload wiring (drag & drop, file input) ------------------------------- */
 
 function updateDropTargetLabel() {
-  const label = state.currentView === 'bin' ? 'a moodboard' : (boardById(state.currentBoardId)?.name || 'this moodboard');
-  $('#dropTargetName').textContent = label;
+  $('#dropTargetName').textContent = boardById(state.currentBoardId)?.name || 'this moodboard';
 }
 
 function initUpload() {
   const fileInput = $('#fileInput');
-  $('#uploadBtn').addEventListener('click', () => {
-    if (state.currentView === 'bin') { showToast('Switch to a moodboard to add images'); return; }
-    fileInput.click();
-  });
+  $('#uploadBtn').addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', (e) => { addImages(e.target.files); fileInput.value = ''; });
 
   const scroll = $('#boardScroll');
   let dragCounter = 0;
   scroll.addEventListener('dragenter', (e) => {
-    if (state.currentView === 'bin') return;
     if (!e.dataTransfer.types.includes('Files')) return;
     e.preventDefault();
     dragCounter++;
@@ -950,12 +845,11 @@ function initUpload() {
     e.preventDefault();
     dragCounter = 0;
     scroll.classList.remove('dragging');
-    if (state.currentView === 'bin' || !e.dataTransfer.files?.length) return;
+    if (!e.dataTransfer.files?.length) return;
     addImages(e.dataTransfer.files);
   });
 
   document.addEventListener('paste', (e) => {
-    if (state.currentView === 'bin') return;
     if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.isContentEditable)) return;
     const files = Array.from(e.clipboardData?.files || []);
     if (files.length) addImages(files);
@@ -966,7 +860,6 @@ function initUpload() {
 
 function initTopbar() {
   $('#boardTitle').addEventListener('blur', async (e) => {
-    if (state.currentView !== 'board') return;
     const board = boardById(state.currentBoardId);
     const newName = e.target.textContent.trim() || 'Untitled Moodboard';
     e.target.textContent = newName;
@@ -991,7 +884,6 @@ function initTopbar() {
   $$('.view-toggle-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === state.viewMode));
 
   $('#newBoardBtn').addEventListener('click', createBoard);
-  $('#binBtn').addEventListener('click', showBin);
 
   $('#sidebarToggleBtn').addEventListener('click', () => {
     setSidebarOpen($('#sidebar').classList.contains('collapsed'));
@@ -1029,7 +921,7 @@ function sig(list, keys) {
 }
 
 const BOARD_SIG_KEYS = ['id', 'name', 'color', 'order', 'imageCount'];
-const IMAGE_SIG_KEYS = ['id', 'name', 'categoryId', 'boardId', 'deletedAt'];
+const IMAGE_SIG_KEYS = ['id', 'name', 'categoryId', 'boardId'];
 
 async function pollTick() {
   if (isUserBusy()) return;
@@ -1038,27 +930,18 @@ async function pollTick() {
     if (sig(boards, BOARD_SIG_KEYS) !== sig(state.boards, BOARD_SIG_KEYS)) {
       state.boards = boards;
       writeCache('mb.cache.boards', state.boards);
-      if (state.currentView === 'board' && !boardById(state.currentBoardId)) {
+      if (!boardById(state.currentBoardId)) {
         if (state.boards.length) await selectBoard(state.boards[0].id);
         return;
       }
       renderSidebar();
     }
-    if (state.currentView === 'board') {
-      const images = await Api.listImages(state.currentBoardId);
-      if (sig(images, IMAGE_SIG_KEYS) !== sig(state.images, IMAGE_SIG_KEYS)) {
-        state.images = images;
-        writeCache('mb.cache.images.' + state.currentBoardId, state.images);
-        renderCategoryBar();
-        renderBoard();
-      }
-    } else if (state.currentView === 'bin') {
-      const bin = await Api.listBin();
-      if (sig(bin, IMAGE_SIG_KEYS) !== sig(state.binImages, IMAGE_SIG_KEYS)) {
-        state.binImages = bin;
-        writeCache('mb.cache.bin', state.binImages);
-        renderBoard();
-      }
+    const images = await Api.listImages(state.currentBoardId);
+    if (sig(images, IMAGE_SIG_KEYS) !== sig(state.images, IMAGE_SIG_KEYS)) {
+      state.images = images;
+      writeCache('mb.cache.images.' + state.currentBoardId, state.images);
+      renderCategoryBar();
+      renderBoard();
     }
   } catch {
     // transient/offline — next tick retries
@@ -1071,6 +954,28 @@ function startPolling() {
 
 /* ------------------------------- Boot ------------------------------- */
 
+// Lets the boot screen stay up until whatever images are already in the
+// DOM have actually loaded (or failed), capped so one slow/broken image
+// can't hold the app hostage.
+function waitForVisibleImages(maxWaitMs = 900) {
+  const pending = $$('#masonry img').filter((img) => !img.complete);
+  if (!pending.length) return Promise.resolve();
+  return Promise.race([
+    Promise.all(pending.map((img) => new Promise((resolve) => {
+      img.addEventListener('load', resolve, { once: true });
+      img.addEventListener('error', resolve, { once: true });
+    }))),
+    new Promise((resolve) => setTimeout(resolve, maxWaitMs)),
+  ]);
+}
+
+function hideBootScreen() {
+  const boot = $('#bootScreen');
+  if (!boot) return;
+  boot.classList.add('hidden');
+  setTimeout(() => boot.remove(), 400);
+}
+
 async function init() {
   initTopbar();
   initUpload();
@@ -1082,17 +987,20 @@ async function init() {
   // Paint instantly from last visit's data (if any) so the UI never sits
   // blank while the network request below is in flight.
   const cachedBoards = readCache('mb.cache.boards');
+  let paintedFromCache = false;
   if (cachedBoards && cachedBoards.length) {
     state.boards = cachedBoards;
     state.categories = readCache('mb.cache.categories') || [];
     const startBoard = boardById(savedBoard) ? savedBoard : state.boards[0].id;
-    state.currentView = 'board';
     state.currentBoardId = startBoard;
     state.currentCategoryId = 'all';
     state.images = readCache('mb.cache.images.' + startBoard) || [];
     renderSidebar();
     renderCategoryBar();
     renderBoard();
+    paintedFromCache = true;
+    await waitForVisibleImages();
+    hideBootScreen();
   }
 
   try {
@@ -1107,7 +1015,13 @@ async function init() {
 
     const startBoard = boardById(savedBoard) ? savedBoard : state.boards[0].id;
     await selectBoard(startBoard);
+
+    if (!paintedFromCache) {
+      await waitForVisibleImages();
+      hideBootScreen();
+    }
   } catch (err) {
+    hideBootScreen();
     if (!cachedBoards) throw err; // nothing cached to fall back on — surface the real error
     console.error('Background refresh failed, showing last cached data', err);
   }
@@ -1117,6 +1031,7 @@ async function init() {
 
 init().catch((err) => {
   console.error('Failed to start Moodboard', err);
+  hideBootScreen();
   document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,sans-serif;color:#666;text-align:center;padding:20px;">
     <div><h2 style="color:#111;">Couldn’t load Moodboard</h2><p>The shared backend might not be set up yet, or is temporarily unreachable. Check the browser console for details.</p></div>
   </div>`;

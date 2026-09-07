@@ -53,12 +53,10 @@ function ensureSchema() {
           size INTEGER,
           thumb_url TEXT NOT NULL,
           full_url TEXT NOT NULL,
-          created_at BIGINT NOT NULL,
-          deleted_at BIGINT
+          created_at BIGINT NOT NULL
         )
       `;
       await sql`CREATE INDEX IF NOT EXISTS images_board_idx ON images(board_id)`;
-      await sql`CREATE INDEX IF NOT EXISTS images_deleted_idx ON images(deleted_at)`;
       await sql`CREATE INDEX IF NOT EXISTS categories_board_idx ON categories(board_id)`;
     })().catch((err) => {
       schemaReady = null; // allow retry on next request if it failed
@@ -88,7 +86,6 @@ function imageRow(r) {
     thumbUrl: r.thumb_url,
     fullUrl: r.full_url,
     createdAt: Number(r.created_at),
-    deletedAt: r.deleted_at === null ? null : Number(r.deleted_at),
   };
 }
 

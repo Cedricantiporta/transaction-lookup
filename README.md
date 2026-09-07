@@ -11,8 +11,8 @@ anyone who has the link, no login required.
 - **Masonry and grid views**, with fast client-side generated thumbnails
 - **Categories** — tag images per moodboard and filter with the category chips
 - **Full-screen viewer** with keyboard navigation, renaming, and re-categorizing
-- **Bin** — deleted images are held for 30 days (with an Undo toast) before being
-  permanently purged automatically, on a daily schedule via a Vercel Cron Job
+- Deleting an image is immediate and permanent (with a confirmation prompt) —
+  there's no bin or recovery window
 - **Shared** — anyone with the link sees and edits the same boards; open
   changes show up for others within ~15 seconds via lightweight polling
 - Multi-select, drag-to-move between moodboards, and downloads
