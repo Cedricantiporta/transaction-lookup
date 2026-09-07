@@ -1,4 +1,5 @@
 const { neon } = require('@neondatabase/serverless');
+const { uid } = require('./util');
 
 // Support whichever env var name the connected Postgres/Neon integration
 // happens to inject (Neon's own integration uses DATABASE_URL; the legacy
@@ -30,9 +31,14 @@ function ensureSchema() {
           name TEXT NOT NULL,
           color TEXT NOT NULL,
           board_order INTEGER NOT NULL DEFAULT 0,
-          created_at BIGINT NOT NULL
+          created_at BIGINT NOT NULL,
+          type TEXT NOT NULL DEFAULT 'moodboard'
         )
       `;
+      // Additive — 'moodboard' (shown in the sidebar), 'design' and
+      // 'mockup' (folders used only by the mockup generator, never shown
+      // as a regular moodboard).
+      await sql`ALTER TABLE boards ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'moodboard'`;
       await sql`
         CREATE TABLE IF NOT EXISTS categories (
           id TEXT PRIMARY KEY,
@@ -90,14 +96,37 @@ function ensureSchema() {
         )
       `;
       await sql`CREATE INDEX IF NOT EXISTS activity_log_created_idx ON activity_log(created_at DESC)`;
-      await sql`
-        CREATE TABLE IF NOT EXISTS mockup_items (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          image_url TEXT NOT NULL,
-          created_at BIGINT NOT NULL
-        )
-      `;
+
+      // One-time migration: mockup items used to live in their own table,
+      // before mockup items and designs became regular boards/images (just
+      // hidden from the main sidebar via type). If that old table exists
+      // and still has rows nobody's migrated yet, fold them into a fresh
+      // "Mockup Items" folder so nothing uploaded during testing is lost.
+      // Non-fatal — a hiccup here shouldn't break the whole app.
+      try {
+        const { rows: tableCheck } = await sql`SELECT to_regclass('mockup_items') AS t`;
+        if (tableCheck[0].t) {
+          const { rows: oldItems } = await sql`SELECT * FROM mockup_items`;
+          if (oldItems.length) {
+            const { rows: existing } = await sql`SELECT id FROM boards WHERE type = 'mockup' LIMIT 1`;
+            if (!existing.length) {
+              const folderId = uid();
+              await sql`
+                INSERT INTO boards (id, name, color, board_order, created_at, type)
+                VALUES (${folderId}, 'Mockup Items', '#ac8e68', 0, ${Date.now()}, 'mockup')
+              `;
+              for (const item of oldItems) {
+                await sql`
+                  INSERT INTO images (id, board_id, category_id, name, width, height, size, thumb_url, full_url, created_at)
+                  VALUES (${item.id}, ${folderId}, NULL, ${item.name}, NULL, NULL, 0, ${item.image_url}, ${item.image_url}, ${item.created_at})
+                `;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error('mockup_items migration failed (non-fatal)', err);
+      }
     })().catch((err) => {
       schemaReady = null; // allow retry on next request if it failed
       throw err;
@@ -107,7 +136,7 @@ function ensureSchema() {
 }
 
 function boardRow(r) {
-  return { id: r.id, name: r.name, color: r.color, order: r.board_order, createdAt: Number(r.created_at) };
+  return { id: r.id, name: r.name, color: r.color, order: r.board_order, createdAt: Number(r.created_at), type: r.type };
 }
 
 function categoryRow(r) {
@@ -135,10 +164,6 @@ function parseColors(raw) {
   if (!raw) return null;
   try { const arr = JSON.parse(raw); return Array.isArray(arr) ? arr : null; }
   catch { return null; }
-}
-
-function mockupItemRow(r) {
-  return { id: r.id, name: r.name, imageUrl: r.image_url, createdAt: Number(r.created_at) };
 }
 
 function activityRow(r) {
@@ -180,4 +205,4 @@ function send(res, status, data) {
   res.status(status).json(data);
 }
 
-module.exports = { sql, ensureSchema, boardRow, categoryRow, imageRow, activityRow, mockupItemRow, readJson, send };
+module.exports = { sql, ensureSchema, boardRow, categoryRow, imageRow, activityRow, readJson, send };

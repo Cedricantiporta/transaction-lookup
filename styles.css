@@ -887,8 +887,27 @@ img{ -webkit-user-drag: none; }
   text-transform:uppercase; letter-spacing:.04em;
   margin-bottom:8px;
 }
+.mockup-folder-tabs{
+  display:flex; flex-wrap:wrap; gap:6px;
+  margin-bottom:10px;
+}
+.mockup-folder-tab{
+  padding: 5px 11px;
+  border-radius:20px;
+  border:1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size:12px; font-weight:520;
+  cursor:pointer;
+  white-space:nowrap;
+}
+.mockup-folder-tab:hover{ border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.mockup-folder-tab.active{ background: var(--text); border-color: var(--text); color: var(--bg); }
+:root[data-theme="dark"] .mockup-folder-tab.active{ color:#000; }
+.mockup-folder-tab-add{ color: var(--text-tertiary); border-style:dashed; }
 .mockup-grid{
   display:flex; flex-wrap:wrap; gap:8px;
+  min-height:64px;
   max-height:150px; overflow-y:auto;
 }
 .mockup-tile{

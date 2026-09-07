@@ -66,7 +66,7 @@ const qs = (id) => `?id=${encodeURIComponent(id)}`;
 const jsonBody = (body) => ({ headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
 const Api = {
-  listBoards: () => request('/api/boards'),
+  listBoards: (type) => request(`/api/boards${type ? `?type=${encodeURIComponent(type)}` : ''}`),
   createBoard: (body) => request('/api/boards', { method: 'POST', ...jsonBody(body) }),
   renameBoard: (id, name) => request(`/api/boards${qs(id)}`, { method: 'PATCH', ...jsonBody({ name }) }),
   setBoardColor: (id, color) => request(`/api/boards${qs(id)}`, { method: 'PATCH', ...jsonBody({ color }) }),
@@ -85,9 +85,6 @@ const Api = {
 
   listActivity: () => request('/api/activity'),
 
-  listMockupItems: () => request('/api/mockup-items'),
-  uploadMockupItem: (formData) => request('/api/mockup-items', { method: 'POST', body: formData }),
-  deleteMockupItem: (id) => request(`/api/mockup-items${qs(id)}`, { method: 'DELETE' }),
   generateMockup: (body) => request('/api/mockup/generate', { method: 'POST', ...jsonBody(body) }),
 };
 
@@ -1232,24 +1229,25 @@ function closeActivityPanel() {
 
 /* ------------------------------- AI mockup generator ------------------------------- */
 
-const mockupState = { items: [], selectedItemId: null, selectedDesignId: null };
+// Mockup items and designs live in their own folders — boards with
+// type 'mockup' / 'design' instead of 'moodboard', so they never show up
+// in the regular sidebar, but reuse all the same board/image plumbing.
+const mockupState = {
+  item: { folders: [], folderId: null, images: [], selectedId: null },
+  design: { folders: [], folderId: null, images: [], selectedId: null },
+};
+
+function mockupKindConfig(kind) {
+  return kind === 'item'
+    ? { type: 'mockup', tabsEl: '#mockupItemFolderTabs', gridEl: '#mockupItemGrid', fileInput: '#mockupItemFileInput', newFolderTitle: 'New mockup item folder' }
+    : { type: 'design', tabsEl: '#mockupDesignFolderTabs', gridEl: '#mockupDesignGrid', fileInput: '#mockupDesignFileInput', newFolderTitle: 'New design folder' };
+}
 
 async function openMockupModal() {
-  if (!state.images.length) {
-    showToast('Add an image to this moodboard first — that becomes the design.');
-    return;
-  }
-  mockupState.selectedItemId = null;
-  mockupState.selectedDesignId = null;
+  mockupState.item.selectedId = null;
+  mockupState.design.selectedId = null;
   $('#mockupModalBackdrop').hidden = false;
-  renderMockupDesignGrid();
-  try {
-    mockupState.items = await Api.listMockupItems();
-  } catch (err) {
-    mockupState.items = [];
-    console.error('Failed to load mockup items', err);
-  }
-  renderMockupItemGrid();
+  await Promise.all([loadMockupFolders('item'), loadMockupFolders('design')]);
   updateMockupGenerateBtn();
 }
 
@@ -1258,62 +1256,133 @@ function closeMockupModal() {
 }
 
 function updateMockupGenerateBtn() {
-  $('#mockupGenerateBtn').disabled = !(mockupState.selectedItemId && mockupState.selectedDesignId);
+  $('#mockupGenerateBtn').disabled = !(mockupState.item.selectedId && mockupState.design.selectedId);
 }
 
-function renderMockupItemGrid() {
-  const grid = $('#mockupItemGrid');
-  grid.innerHTML = '';
-  mockupState.items.forEach((item) => {
-    const tile = document.createElement('div');
-    tile.className = 'mockup-tile' + (mockupState.selectedItemId === item.id ? ' selected' : '');
-    tile.title = item.name;
-    tile.innerHTML = `<img src="${item.imageUrl}" alt="${escapeHtml(item.name)}">`;
-    tile.addEventListener('click', () => {
-      mockupState.selectedItemId = item.id;
-      renderMockupItemGrid();
-      updateMockupGenerateBtn();
+async function loadMockupFolders(kind) {
+  const { type } = mockupKindConfig(kind);
+  const bucket = mockupState[kind];
+  try {
+    bucket.folders = await Api.listBoards(type);
+  } catch (err) {
+    bucket.folders = [];
+    console.error(`Failed to load ${type} folders`, err);
+  }
+  bucket.folderId = bucket.folders[0]?.id || null;
+  renderMockupFolderTabs(kind);
+  await loadMockupFolderImages(kind);
+}
+
+async function loadMockupFolderImages(kind) {
+  const bucket = mockupState[kind];
+  bucket.images = [];
+  bucket.selectedId = null;
+  if (bucket.folderId) {
+    try {
+      bucket.images = await Api.listImages(bucket.folderId);
+    } catch (err) {
+      console.error('Failed to load folder images', err);
+    }
+  }
+  renderMockupGrid(kind);
+  updateMockupGenerateBtn();
+}
+
+function renderMockupFolderTabs(kind) {
+  const { tabsEl, newFolderTitle } = mockupKindConfig(kind);
+  const bucket = mockupState[kind];
+  const container = $(tabsEl);
+  container.innerHTML = '';
+
+  bucket.folders.forEach((folder) => {
+    const tab = document.createElement('button');
+    tab.className = 'mockup-folder-tab' + (bucket.folderId === folder.id ? ' active' : '');
+    tab.textContent = folder.name;
+    tab.addEventListener('click', () => {
+      bucket.folderId = folder.id;
+      renderMockupFolderTabs(kind);
+      loadMockupFolderImages(kind);
     });
-    grid.appendChild(tile);
+    container.appendChild(tab);
   });
-  const addTile = document.createElement('button');
-  addTile.className = 'mockup-tile mockup-tile-add';
-  addTile.title = 'Upload a new mockup item';
-  addTile.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
-  addTile.addEventListener('click', () => $('#mockupItemFileInput').click());
-  grid.appendChild(addTile);
+
+  const addTab = document.createElement('button');
+  addTab.className = 'mockup-folder-tab mockup-folder-tab-add';
+  addTab.textContent = '+ New folder';
+  addTab.title = newFolderTitle;
+  addTab.addEventListener('click', () => createMockupFolder(kind));
+  container.appendChild(addTab);
 }
 
-function renderMockupDesignGrid() {
-  const grid = $('#mockupDesignGrid');
+async function createMockupFolder(kind) {
+  const { type } = mockupKindConfig(kind);
+  const name = await showTextPrompt({ title: mockupKindConfig(kind).newFolderTitle, placeholder: 'Folder name' });
+  if (!name) return;
+  const bucket = mockupState[kind];
+  try {
+    const folder = await Api.createBoard({ name, type });
+    bucket.folders.push(folder);
+    bucket.folderId = folder.id;
+    renderMockupFolderTabs(kind);
+    await loadMockupFolderImages(kind);
+  } catch (err) {
+    showToast('Failed to create folder');
+    console.error('Failed to create folder', err);
+  }
+}
+
+function renderMockupGrid(kind) {
+  const { gridEl, fileInput } = mockupKindConfig(kind);
+  const bucket = mockupState[kind];
+  const grid = $(gridEl);
   grid.innerHTML = '';
-  state.images.forEach((image) => {
+
+  bucket.images.forEach((image) => {
     const tile = document.createElement('div');
-    tile.className = 'mockup-tile' + (mockupState.selectedDesignId === image.id ? ' selected' : '');
+    tile.className = 'mockup-tile' + (bucket.selectedId === image.id ? ' selected' : '');
     tile.title = image.name;
     tile.innerHTML = `<img src="${image.thumbUrl}" alt="${escapeHtml(image.name)}">`;
     tile.addEventListener('click', () => {
-      mockupState.selectedDesignId = image.id;
-      renderMockupDesignGrid();
+      bucket.selectedId = image.id;
+      renderMockupGrid(kind);
       updateMockupGenerateBtn();
     });
     grid.appendChild(tile);
   });
+
+  const addTile = document.createElement('button');
+  addTile.className = 'mockup-tile mockup-tile-add';
+  addTile.title = bucket.folderId ? 'Upload an image to this folder' : 'Create a folder first';
+  addTile.disabled = !bucket.folderId;
+  addTile.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  addTile.addEventListener('click', () => { if (bucket.folderId) $(fileInput).click(); });
+  grid.appendChild(addTile);
 }
 
-async function uploadMockupItemFile(file) {
-  const form = new FormData();
-  form.append('name', file.name.replace(/\.[^/.]+$/, '') || 'Mockup item');
-  form.append('image', file);
+async function uploadToMockupFolder(kind, file) {
+  const bucket = mockupState[kind];
+  if (!bucket.folderId) return;
   try {
-    const item = await Api.uploadMockupItem(form);
-    mockupState.items.unshift(item);
-    mockupState.selectedItemId = item.id;
-    renderMockupItemGrid();
+    const [{ blob: thumbBlob }, { blob: fullBlob, width, height }, colors] = await Promise.all([
+      fileToThumb(file), fileToFull(file), computeDominantColors(file),
+    ]);
+    const form = new FormData();
+    form.append('boardId', bucket.folderId);
+    form.append('name', file.name.replace(/\.[^/.]+$/, '') || 'Untitled');
+    form.append('width', width);
+    form.append('height', height);
+    form.append('color', colors[0] || '');
+    form.append('colors', JSON.stringify(colors));
+    form.append('thumb', thumbBlob, 'thumb.jpg');
+    form.append('full', fullBlob, 'full.jpg');
+    const image = await Api.uploadImage(form);
+    bucket.images.unshift(image);
+    bucket.selectedId = image.id;
+    renderMockupGrid(kind);
     updateMockupGenerateBtn();
   } catch (err) {
-    showToast('Failed to upload mockup item');
-    console.error('Mockup item upload failed', err);
+    showToast('Upload failed');
+    console.error('Mockup folder upload failed', err);
   }
 }
 
@@ -1324,8 +1393,8 @@ async function generateMockup() {
   $('#mockupCancelBtn').disabled = true;
   try {
     const image = await Api.generateMockup({
-      mockupItemId: mockupState.selectedItemId,
-      designImageId: mockupState.selectedDesignId,
+      mockupItemId: mockupState.item.selectedId,
+      designImageId: mockupState.design.selectedId,
       boardId: state.currentBoardId,
     });
     state.images.unshift(image);
@@ -1352,7 +1421,12 @@ function initMockup() {
   $('#mockupGenerateBtn').addEventListener('click', generateMockup);
   $('#mockupItemFileInput').addEventListener('change', (e) => {
     const file = e.target.files[0];
-    if (file) uploadMockupItemFile(file);
+    if (file) uploadToMockupFolder('item', file);
+    e.target.value = '';
+  });
+  $('#mockupDesignFileInput').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) uploadToMockupFolder('design', file);
     e.target.value = '';
   });
 }

@@ -26,10 +26,11 @@ signed-in team, with an activity log of who did what.
 - Live sync — changes made by others show up within ~15 seconds via
   lightweight polling
 - Multi-select for bulk download, move, and delete
-- **AI mockups** — upload a blank product photo (t-shirt, mug, bag, etc.) once
-  as a reusable "mockup item," then pick one plus a design already on the
-  board to generate a composited product mockup via the Gemini API; the
-  result is added to the board like any other image
+- **AI mockups** — mockup items (blank product photos) and designs live in
+  their own folders, organized just like moodboards but kept out of the
+  main sidebar. Pick one item and one design, generate via the Gemini API,
+  and the composited result is added to the current moodboard like any
+  other image
 
 ## Tech
 

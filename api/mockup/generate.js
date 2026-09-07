@@ -42,7 +42,7 @@ module.exports = async function handler(req, res) {
   }
 
   const [{ rows: itemRows }, { rows: designRows }] = await Promise.all([
-    sql`SELECT * FROM mockup_items WHERE id = ${mockupItemId}`,
+    sql`SELECT * FROM images WHERE id = ${mockupItemId}`,
     sql`SELECT * FROM images WHERE id = ${designImageId}`,
   ]);
   if (!itemRows.length) return send(res, 404, { error: 'Mockup item not found' });
@@ -52,7 +52,7 @@ module.exports = async function handler(req, res) {
 
   try {
     const [itemImg, designImg] = await Promise.all([
-      fetchAsBase64(mockupItem.image_url),
+      fetchAsBase64(mockupItem.full_url),
       fetchAsBase64(design.full_url),
     ]);
 
