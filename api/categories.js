@@ -1,8 +1,11 @@
 const { sql, ensureSchema, categoryRow, readJson, send } = require('./_lib/db');
+const { requireAuth } = require('./_lib/auth');
 const { uid, pickColor, methodNotAllowed } = require('./_lib/util');
 
 module.exports = async function handler(req, res) {
   await ensureSchema();
+  const session = requireAuth(req, res);
+  if (!session) return;
 
   if (req.method === 'GET') {
     const { boardId } = req.query;

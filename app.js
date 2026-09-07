@@ -49,6 +49,10 @@ function relativeDate(ts) {
 
 async function request(url, options) {
   const res = await fetch(url, options);
+  if (res.status === 401) {
+    location.reload(); // session expired/cleared elsewhere — re-check auth from scratch
+    throw new Error('Sign in required');
+  }
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
     try { const data = await res.json(); if (data && data.error) message = data.error; } catch { /* ignore */ }
@@ -76,7 +80,26 @@ const Api = {
   uploadImage: (formData) => request('/api/images', { method: 'POST', body: formData }),
   patchImage: (id, body) => request(`/api/images${qs(id)}`, { method: 'PATCH', ...jsonBody(body) }),
   deleteImage: (id) => request(`/api/images${qs(id)}`, { method: 'DELETE' }),
+
+  listActivity: () => request('/api/activity'),
 };
+
+// Deliberately bypasses request()'s auto-reload-on-401 — an unauthenticated
+// /api/auth/me is the expected first-load state, not a session expiring
+// mid-use, so a 401 here just means "show the sign-in screen."
+async function checkAuth() {
+  try {
+    const res = await fetch('/api/auth/me');
+    return res.ok ? res.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function signOut() {
+  try { await fetch('/api/auth/logout', { method: 'POST' }); } catch { /* best-effort */ }
+  location.reload();
+}
 
 /* ------------------------------- Image processing ------------------------------- */
 
@@ -1013,6 +1036,87 @@ function initTopbar() {
     setSidebarOpen($('#sidebar').classList.contains('collapsed'));
   });
   $('#sidebarBackdrop').addEventListener('click', () => setSidebarOpen(false));
+
+  $('#signOutBtn').addEventListener('click', signOut);
+  $('#activityBtn').addEventListener('click', openActivityPanel);
+  $('#activityCloseBtn').addEventListener('click', closeActivityPanel);
+  $('#activityPanelBackdrop').addEventListener('click', closeActivityPanel);
+}
+
+/* ------------------------------- Auth / profile ------------------------------- */
+
+function renderUserProfile(user) {
+  const img = $('#profileAvatar');
+  const fallback = $('#profileAvatarFallback');
+  const initial = (user.name || user.email || '?').trim().charAt(0).toUpperCase();
+  fallback.textContent = initial;
+
+  if (user.picture) {
+    img.onerror = () => { img.hidden = true; fallback.hidden = false; };
+    img.onload = () => { img.hidden = false; fallback.hidden = true; };
+    img.src = user.picture;
+    img.alt = user.name || user.email || '';
+  } else {
+    img.hidden = true;
+    fallback.hidden = false;
+  }
+
+  $('#profileName').textContent = user.name || user.email;
+  $('#profileEmail').textContent = user.email;
+  $('#sidebarProfile').hidden = false;
+}
+
+function showSignInScreen() {
+  if (new URLSearchParams(location.search).get('auth_error')) {
+    $('#signInError').hidden = false;
+    history.replaceState(null, '', location.pathname);
+  }
+  $('#signInScreen').hidden = false;
+}
+
+/* ------------------------------- Activity log ------------------------------- */
+
+const ACTIVITY_VERBS = {
+  create_board: (a) => `created the moodboard <b>${escapeHtml(a.targetName)}</b>`,
+  delete_board: (a) => `deleted the moodboard <b>${escapeHtml(a.targetName)}</b>`,
+  upload_image: (a) => `added <b>${escapeHtml(a.targetName)}</b> to <b>${escapeHtml(a.boardName)}</b>`,
+  delete_image: (a) => `deleted <b>${escapeHtml(a.targetName)}</b>`,
+  move_image: (a) => `moved <b>${escapeHtml(a.targetName)}</b> to <b>${escapeHtml(a.boardName)}</b>`,
+};
+
+function describeActivity(a) {
+  const who = escapeHtml(a.userName || a.userEmail || 'Someone');
+  const verb = ACTIVITY_VERBS[a.action];
+  return `<b>${who}</b> ${verb ? verb(a) : escapeHtml(a.action)}`;
+}
+
+async function openActivityPanel() {
+  const panel = $('#activityPanel');
+  panel.hidden = false;
+  panel.setAttribute('aria-hidden', 'false');
+  const list = $('#activityList');
+  list.innerHTML = '<div class="activity-empty">Loading&hellip;</div>';
+  try {
+    const entries = await Api.listActivity();
+    if (!entries.length) {
+      list.innerHTML = '<div class="activity-empty">Nothing yet — actions like uploads and deletes will show up here.</div>';
+      return;
+    }
+    list.innerHTML = entries.map((a) => `
+      <div class="activity-item">
+        <div class="activity-item-text">${describeActivity(a)}</div>
+        <div class="activity-item-time">${relativeDate(a.createdAt)}</div>
+      </div>`).join('');
+  } catch (err) {
+    list.innerHTML = '<div class="activity-empty">Couldn’t load activity.</div>';
+    console.error('Failed to load activity', err);
+  }
+}
+
+function closeActivityPanel() {
+  const panel = $('#activityPanel');
+  panel.hidden = true;
+  panel.setAttribute('aria-hidden', 'true');
 }
 
 function initKeyboard() {
@@ -1021,6 +1125,10 @@ function initKeyboard() {
       if (e.key === 'Escape') closeLightbox();
       if (e.key === 'ArrowLeft') navLightbox(-1);
       if (e.key === 'ArrowRight') navLightbox(1);
+      return;
+    }
+    if (!$('#activityPanel').hidden) {
+      if (e.key === 'Escape') closeActivityPanel();
       return;
     }
     if (!$('#modalBackdrop').hidden) return;
@@ -1105,6 +1213,17 @@ async function init() {
   initUpload();
   initKeyboard();
   setSidebarOpen(window.innerWidth > MOBILE_BREAKPOINT);
+
+  // Sign-in is required before anything else renders — including cached
+  // data from a previous visit, since that cache could belong to whoever
+  // last signed in on this browser, not necessarily the current visitor.
+  const user = await checkAuth();
+  if (!user) {
+    hideBootScreen();
+    showSignInScreen();
+    return;
+  }
+  renderUserProfile(user);
 
   const savedBoard = localStorage.getItem('mb.activeBoard');
 

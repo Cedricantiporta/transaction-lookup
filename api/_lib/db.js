@@ -62,6 +62,32 @@ function ensureSchema() {
       await sql`ALTER TABLE images ADD COLUMN IF NOT EXISTS dominant_color TEXT`;
       await sql`CREATE INDEX IF NOT EXISTS images_board_idx ON images(board_id)`;
       await sql`CREATE INDEX IF NOT EXISTS categories_board_idx ON categories(board_id)`;
+      await sql`
+        CREATE TABLE IF NOT EXISTS users (
+          id TEXT PRIMARY KEY,
+          email TEXT NOT NULL,
+          name TEXT,
+          picture TEXT,
+          created_at BIGINT NOT NULL,
+          last_seen_at BIGINT NOT NULL
+        )
+      `;
+      await sql`
+        CREATE TABLE IF NOT EXISTS activity_log (
+          id TEXT PRIMARY KEY,
+          user_id TEXT,
+          user_name TEXT,
+          user_email TEXT,
+          action TEXT NOT NULL,
+          target_type TEXT,
+          target_id TEXT,
+          target_name TEXT,
+          board_id TEXT,
+          board_name TEXT,
+          created_at BIGINT NOT NULL
+        )
+      `;
+      await sql`CREATE INDEX IF NOT EXISTS activity_log_created_idx ON activity_log(created_at DESC)`;
     })().catch((err) => {
       schemaReady = null; // allow retry on next request if it failed
       throw err;
@@ -94,6 +120,22 @@ function imageRow(r) {
   };
 }
 
+function activityRow(r) {
+  return {
+    id: r.id,
+    userId: r.user_id,
+    userName: r.user_name,
+    userEmail: r.user_email,
+    action: r.action,
+    targetType: r.target_type,
+    targetId: r.target_id,
+    targetName: r.target_name,
+    boardId: r.board_id,
+    boardName: r.board_name,
+    createdAt: Number(r.created_at),
+  };
+}
+
 // Vercel's Node runtime pre-parses JSON/urlencoded bodies into req.body but
 // deliberately leaves multipart untouched — handle both cases.
 async function readJson(req) {
@@ -117,4 +159,4 @@ function send(res, status, data) {
   res.status(status).json(data);
 }
 
-module.exports = { sql, ensureSchema, boardRow, categoryRow, imageRow, readJson, send };
+module.exports = { sql, ensureSchema, boardRow, categoryRow, imageRow, activityRow, readJson, send };

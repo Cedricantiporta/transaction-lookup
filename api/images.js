@@ -2,6 +2,8 @@ const { formidable } = require('formidable');
 const fs = require('fs');
 const { put, del } = require('@vercel/blob');
 const { sql, ensureSchema, imageRow, readJson, send } = require('./_lib/db');
+const { requireAuth } = require('./_lib/auth');
+const { logActivity } = require('./_lib/activity');
 const { uid, methodNotAllowed } = require('./_lib/util');
 
 function parseMultipart(req) {
@@ -15,6 +17,8 @@ const first = (v) => (Array.isArray(v) ? v[0] : v);
 
 module.exports = async function handler(req, res) {
   await ensureSchema();
+  const session = requireAuth(req, res);
+  if (!session) return;
 
   if (req.method === 'GET') {
     const { boardId } = req.query;
@@ -67,6 +71,11 @@ module.exports = async function handler(req, res) {
         INSERT INTO images (id, board_id, category_id, name, width, height, size, thumb_url, full_url, created_at, dominant_color)
         VALUES (${image.id}, ${image.boardId}, NULL, ${image.name}, ${image.width}, ${image.height}, ${image.size}, ${image.thumbUrl}, ${image.fullUrl}, ${image.createdAt}, ${image.dominantColor})
       `;
+      const { rows: boardRows } = await sql`SELECT name FROM boards WHERE id = ${boardId}`;
+      await logActivity(session, {
+        action: 'upload_image', targetType: 'image', targetId: image.id, targetName: image.name,
+        boardId, boardName: boardRows[0]?.name,
+      });
       return send(res, 201, image);
     } catch (err) {
       console.error('Image upload failed', err);
@@ -83,6 +92,7 @@ module.exports = async function handler(req, res) {
     const body = await readJson(req);
     const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
     let touched = false;
+    let movedToBoardId = null;
 
     if (has('name')) {
       const name = (body.name || 'Untitled').toString().trim() || 'Untitled';
@@ -96,22 +106,34 @@ module.exports = async function handler(req, res) {
     if (has('boardId')) {
       await sql`UPDATE images SET board_id = ${body.boardId} WHERE id = ${id}`;
       touched = true;
+      movedToBoardId = body.boardId;
     }
     if (!touched) return send(res, 400, { error: 'Nothing to update' });
 
     const { rows } = await sql`SELECT * FROM images WHERE id = ${id}`;
     if (!rows.length) return send(res, 404, { error: 'Image not found' });
+
+    if (movedToBoardId) {
+      const { rows: boardRows } = await sql`SELECT name FROM boards WHERE id = ${movedToBoardId}`;
+      await logActivity(session, {
+        action: 'move_image', targetType: 'image', targetId: id, targetName: rows[0].name,
+        boardId: movedToBoardId, boardName: boardRows[0]?.name,
+      });
+    }
     return send(res, 200, imageRow(rows[0]));
   }
 
   if (req.method === 'DELETE') {
-    const { rows } = await sql`SELECT thumb_url, full_url FROM images WHERE id = ${id}`;
+    const { rows } = await sql`SELECT thumb_url, full_url, name, board_id FROM images WHERE id = ${id}`;
     if (!rows.length) return send(res, 404, { error: 'Image not found' });
     await sql`DELETE FROM images WHERE id = ${id}`;
     const urls = [rows[0].thumb_url, rows[0].full_url].filter(Boolean);
     if (urls.length) {
       try { await del(urls); } catch (err) { console.error('Blob cleanup failed', err); }
     }
+    await logActivity(session, {
+      action: 'delete_image', targetType: 'image', targetId: id, targetName: rows[0].name, boardId: rows[0].board_id,
+    });
     return send(res, 204, null);
   }
 
